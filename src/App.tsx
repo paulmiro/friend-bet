@@ -38,6 +38,27 @@ interface Bet {
 
 const friendName = process.env.FRIEND_BET_NAME as string // replaced by bun at build time
 
+const parseLocalDatetime = (value: string): Date => {
+  const [datePart, timePart] = value.split("T")
+  if (!datePart || !timePart) {
+    throw new Error(
+      `Invalid datetime format: "${value}". Expected YYYY-MM-DDTHH:mm`,
+    )
+  }
+  const [year, month, day] = datePart.split("-").map(Number)
+  const [hours, minutes] = timePart.split(":").map(Number)
+  if (
+    year === undefined ||
+    month === undefined ||
+    day === undefined ||
+    hours === undefined ||
+    minutes === undefined
+  ) {
+    throw new Error(`Invalid datetime components in value: "${value}"`)
+  }
+  return new Date(year, month - 1, day, hours, minutes)
+}
+
 export function App() {
   const [user, setUser] = useState<User | null>(null)
   const [events, setEvents] = useState<Event[]>([])
@@ -133,13 +154,16 @@ export function App() {
     e.preventDefault()
     const form = e.target as any
     try {
+      const scheduledTimeLocal = form.scheduled_time.value
+      const scheduledTimeUTC =
+        parseLocalDatetime(scheduledTimeLocal).toISOString()
       const res = await fetch("/api/events", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           creator_id: user?.id,
           description: form.description.value,
-          scheduled_time: form.scheduled_time.value,
+          scheduled_time: scheduledTimeUTC,
         }),
       })
       if (!res.ok) throw new Error("Failed to create event")
@@ -581,10 +605,12 @@ function EventCard({
     e.preventDefault()
     const form = e.target as any
     try {
+      const actualTimeLocal = form.actual_time.value
+      const actualTimeUTC = parseLocalDatetime(actualTimeLocal).toISOString()
       const res = await fetch(`/api/events/${event.id}/resolve`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ actual_arrival_time: form.actual_time.value }),
+        body: JSON.stringify({ actual_arrival_time: actualTimeUTC }),
       })
       if (!res.ok) throw new Error("Resolve failed")
       setIsResolving(false)
