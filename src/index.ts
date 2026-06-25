@@ -68,11 +68,12 @@ const server = serve({
       const history = db
         .prepare(
           `
-        SELECT 
-          b.*, 
+        SELECT
+          b.*,
           e.description as event_description,
           e.actual_arrival_time,
-          e.scheduled_time
+          e.scheduled_time,
+          e.status as event_status
         FROM bets b
         JOIN events e ON b.event_id = e.id
         WHERE b.user_id = ?
@@ -230,6 +231,44 @@ const server = serve({
         )
         .all(req.params.id)
       return Response.json(bets)
+    },
+
+    "/api/events/:id/cancel": {
+      async POST(req) {
+        const { cancel_reason, user_id } = await req.json()
+        const eventId = req.params.id
+
+        const event = db
+          .prepare("SELECT * FROM events WHERE id = ?")
+          .get(eventId) as any
+        if (!event || event.status !== "open")
+          return Response.json({ error: "Invalid event" }, { status: 400 })
+        if (event.creator_id !== user_id)
+          return Response.json({ error: "Nur der Ersteller kann stornieren." }, { status: 403 })
+        if (!cancel_reason?.trim())
+          return Response.json({ error: "Grund ist erforderlich." }, { status: 400 })
+
+        const bets = db
+          .prepare("SELECT * FROM bets WHERE event_id = ?")
+          .all(eventId) as any[]
+
+        const transaction = db.transaction(() => {
+          bets.forEach((b) => {
+            db.prepare("UPDATE users SET balance = balance + ? WHERE id = ?").run(b.amount, b.user_id)
+            db.prepare("UPDATE bets SET payout = ? WHERE id = ?").run(b.amount, b.id)
+          })
+          db.prepare(
+            "UPDATE events SET status = 'cancelled', cancel_reason = ? WHERE id = ?",
+          ).run(cancel_reason.trim(), eventId)
+        })
+        transaction()
+
+        server.publish(
+          "updates",
+          JSON.stringify({ type: "event_cancelled", data: { event_id: eventId } }),
+        )
+        return Response.json({ success: true })
+      },
     },
 
     "/api/events/:id/resolve": {
