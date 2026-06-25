@@ -44,4 +44,8 @@ db.run(`
   );
 `)
 
+try {
+  db.run("ALTER TABLE events ADD COLUMN cancel_reason TEXT")
+} catch {}
+
 console.log("📁 Database initialized.")

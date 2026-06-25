@@ -21,7 +21,8 @@ interface Event {
   description: string
   scheduled_time: string
   actual_arrival_time: string | null
-  status: "open" | "closed"
+  status: "open" | "closed" | "cancelled"
+  cancel_reason?: string | null
 }
 
 interface Bet {
@@ -89,6 +90,7 @@ export function App() {
         showNotification(`New Event: ${data.description}`)
       } else if (
         type === "event_resolved" ||
+        type === "event_cancelled" ||
         type === "bonus_awarded" ||
         type === "bet_placed"
       ) {
@@ -518,7 +520,11 @@ function AccountOverview({ userId }: { userId: number }) {
                     <span className="text-slate-400 font-medium block">
                       -{bet.amount} LC
                     </span>
-                    {bet.actual_arrival_time ? (
+                    {bet.event_status === "cancelled" ? (
+                      <span className="text-red-400 text-sm font-bold bg-red-500/10 px-2 py-0.5 rounded">
+                        Erstattet
+                      </span>
+                    ) : bet.actual_arrival_time ? (
                       <span
                         className={`font-bold ${bet.payout > 0 ? "text-green-400" : "text-slate-600"}`}
                       >
@@ -554,6 +560,7 @@ function EventCard({
   const [bets, setBets] = useState<Bet[]>([])
   const [showBetForm, setShowBetForm] = useState(false)
   const [isResolving, setIsResolving] = useState(false)
+  const [isCancelling, setIsCancelling] = useState(false)
   const [betDirection, setBetDirection] = useState<"plus" | "minus">("plus")
 
   useEffect(() => {
@@ -620,6 +627,23 @@ function EventCard({
     }
   }
 
+  const cancelEvent = async (e: React.FormEvent) => {
+    e.preventDefault()
+    const form = e.target as any
+    try {
+      const res = await fetch(`/api/events/${event.id}/cancel`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cancel_reason: form.cancel_reason.value, user_id: currentUser.id }),
+      })
+      if (!res.ok) throw new Error((await res.json()).error || "Cancel failed")
+      setIsCancelling(false)
+      onUpdate()
+    } catch (err: any) {
+      alert(err.message)
+    }
+  }
+
   const awardBonus = async (betId: number) => {
     try {
       const res = await fetch(`/api/bets/${betId}/bonus`, {
@@ -640,7 +664,7 @@ function EventCard({
 
   return (
     <div
-      className={`group relative bg-slate-900 rounded-3xl border border-slate-800 shadow-xl overflow-hidden transition-all hover:border-slate-700 ${event.status === "closed" ? "opacity-75" : ""}`}
+      className={`group relative bg-slate-900 rounded-3xl border shadow-xl overflow-hidden transition-all ${event.status === "cancelled" ? "border-red-900/50 opacity-75" : "border-slate-800 hover:border-slate-700"} ${event.status !== "open" ? "opacity-75" : ""}`}
     >
       <div className="p-6 space-y-6">
         <div className="flex justify-between items-start">
@@ -655,9 +679,9 @@ function EventCard({
             )}
           </div>
           <span
-            className={`px-2 py-1 rounded-md text-[10px] font-black uppercase tracking-tighter ${event.status === "open" ? "bg-green-500/10 text-green-500" : "bg-slate-800 text-slate-500"}`}
+            className={`px-2 py-1 rounded-md text-[10px] font-black uppercase tracking-tighter ${event.status === "open" ? "bg-green-500/10 text-green-500" : event.status === "cancelled" ? "bg-red-500/10 text-red-400" : "bg-slate-800 text-slate-500"}`}
           >
-            {event.status === "open" ? "Aktiv" : "Beendet"}
+            {event.status === "open" ? "Aktiv" : event.status === "cancelled" ? "Storniert" : "Beendet"}
           </span>
         </div>
 
@@ -675,6 +699,11 @@ function EventCard({
                 Ist:{" "}
                 {new Date(event.actual_arrival_time).toLocaleString("de-DE")}
               </span>
+            </div>
+          )}
+          {event.status === "cancelled" && event.cancel_reason && (
+            <div className="flex items-start gap-3 text-red-400 bg-red-500/5 p-3 rounded-xl border border-red-500/20">
+              <span className="text-sm font-bold">Grund: {event.cancel_reason}</span>
             </div>
           )}
         </div>
@@ -750,7 +779,7 @@ function EventCard({
       <div className="p-6 bg-slate-800/30 border-t border-slate-800">
         {event.status === "open" ? (
           <div className="space-y-4">
-            {!showBetForm && !isResolving && (
+            {!showBetForm && !isResolving && !isCancelling && (
               <div className="flex gap-3">
                 {!isTargetFriend && (
                   <button
@@ -766,6 +795,14 @@ function EventCard({
                     className="flex-1 py-3 bg-slate-800 hover:bg-slate-700 text-white font-bold rounded-xl transition-all active:scale-95"
                   >
                     Beenden
+                  </button>
+                )}
+                {currentUser.id === event.creator_id && (
+                  <button
+                    onClick={() => setIsCancelling(true)}
+                    className="py-3 px-4 bg-red-900/30 hover:bg-red-900/50 text-red-400 font-bold rounded-xl transition-all active:scale-95 border border-red-900/50"
+                  >
+                    Stornieren
                   </button>
                 )}
               </div>
@@ -868,11 +905,46 @@ function EventCard({
                 </div>
               </form>
             )}
+
+            {isCancelling && (
+              <form
+                onSubmit={cancelEvent}
+                className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300"
+              >
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black text-red-500 uppercase tracking-widest">
+                    Grund für Stornierung:
+                  </label>
+                  <input
+                    name="cancel_reason"
+                    type="text"
+                    placeholder="z.B. ist nicht erschienen"
+                    className="w-full px-3 py-2 bg-slate-950 border border-red-900/50 rounded-lg text-sm text-white"
+                    required
+                  />
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    type="submit"
+                    className="flex-1 py-2 bg-red-700 hover:bg-red-600 text-white font-bold rounded-lg transition-all"
+                  >
+                    Wetten stornieren & erstatten
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsCancelling(false)}
+                    className="flex-1 py-2 bg-slate-800 text-slate-400 font-bold rounded-lg transition-all"
+                  >
+                    Abbruch
+                  </button>
+                </div>
+              </form>
+            )}
           </div>
         ) : (
           <div className="text-center py-2">
-            <span className="text-slate-500 text-sm font-bold">
-              Event Abgeschlossen
+            <span className={`text-sm font-bold ${event.status === "cancelled" ? "text-red-500" : "text-slate-500"}`}>
+              {event.status === "cancelled" ? "Event Storniert — Einsätze erstattet" : "Event Abgeschlossen"}
             </span>
           </div>
         )}
