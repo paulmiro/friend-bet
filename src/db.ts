@@ -25,7 +25,7 @@ db.run(`
     scheduled_time DATETIME,
     actual_arrival_time DATETIME,
     status TEXT DEFAULT 'open',
-    created_at INTEGER DEFAULT (unixepoch()),
+    created_at DATETIME DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     FOREIGN KEY(creator_id) REFERENCES users(id)
   );
 `)
@@ -49,14 +49,17 @@ try {
   db.run("ALTER TABLE events ADD COLUMN cancel_reason TEXT")
 } catch {}
 
-// ponytail: constant default only (ADD COLUMN can't take unixepoch()); insert sets it explicitly.
+// ponytail: created_at stored as ISO string like every other date column; insert sets it explicitly.
 try {
-  db.run("ALTER TABLE events ADD COLUMN created_at INTEGER")
+  db.run("ALTER TABLE events ADD COLUMN created_at DATETIME")
 } catch {}
 
-// backfill old rows: use scheduled_time as best proxy, fall back to now. only touches NULLs.
+// migrate legacy unix-epoch integers -> ISO string, then backfill NULLs from scheduled_time or now.
 db.run(
-  "UPDATE events SET created_at = COALESCE(unixepoch(scheduled_time), unixepoch()) WHERE created_at IS NULL",
+  "UPDATE events SET created_at = strftime('%Y-%m-%dT%H:%M:%SZ', created_at, 'unixepoch') WHERE typeof(created_at) = 'integer'",
+)
+db.run(
+  "UPDATE events SET created_at = COALESCE(scheduled_time, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')) WHERE created_at IS NULL",
 )
 
 console.log("📁 Database initialized.")

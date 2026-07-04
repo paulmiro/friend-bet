@@ -6,6 +6,7 @@ import {
   LogOut,
   CheckCircle2,
   User as UserIcon,
+  Rss,
 } from "lucide-react"
 
 interface User {
@@ -350,6 +351,15 @@ export function App() {
             >
               Transparenz & Formeln
             </button>
+            <a
+              href="/rss.xml"
+              target="_blank"
+              rel="noreferrer"
+              aria-label="RSS Feed"
+              className="hover:text-orange-400 transition-colors"
+            >
+              <Rss size={18} />
+            </a>
           </div>
           <span>© 2026 {friendName}-Bet</span>
         </div>
