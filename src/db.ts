@@ -25,6 +25,7 @@ db.run(`
     scheduled_time DATETIME,
     actual_arrival_time DATETIME,
     status TEXT DEFAULT 'open',
+    created_at INTEGER DEFAULT (unixepoch()),
     FOREIGN KEY(creator_id) REFERENCES users(id)
   );
 `)
@@ -47,5 +48,15 @@ db.run(`
 try {
   db.run("ALTER TABLE events ADD COLUMN cancel_reason TEXT")
 } catch {}
+
+// ponytail: constant default only (ADD COLUMN can't take unixepoch()); insert sets it explicitly.
+try {
+  db.run("ALTER TABLE events ADD COLUMN created_at INTEGER")
+} catch {}
+
+// backfill old rows: use scheduled_time as best proxy, fall back to now. only touches NULLs.
+db.run(
+  "UPDATE events SET created_at = COALESCE(unixepoch(scheduled_time), unixepoch()) WHERE created_at IS NULL",
+)
 
 console.log("📁 Database initialized.")
