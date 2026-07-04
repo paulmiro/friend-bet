@@ -22,6 +22,51 @@ const server = serve({
       },
     },
 
+    "/rss.xml": (req) => {
+      const origin = new URL(req.url).origin
+      const events = db
+        .prepare(
+          `SELECT events.*, users.username as creator_name
+           FROM events JOIN users ON events.creator_id = users.id
+           ORDER BY events.id DESC LIMIT 50`,
+        )
+        .all() as any[]
+
+      // ponytail: hand-rolled RSS 2.0, no feed lib. Add one if we need Atom/enclosures.
+      const esc = (s: string) =>
+        String(s).replace(/[<>&'"]/g, (c) =>
+          ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", "'": "&apos;", '"': "&quot;" })[c]!,
+        )
+
+      const items = events
+        .map((e) => {
+          // stored as unix epoch; RSS pubDate must be RFC-822
+          const pubDate = e.created_at
+            ? `\n      <pubDate>${new Date(e.created_at * 1000).toUTCString()}</pubDate>`
+            : ""
+          return `    <item>
+      <title>${esc(`${FRIEND_NAME}-Bet: ${e.description}`)}</title>
+      <link>${origin}/</link>
+      <guid isPermaLink="false">event-${e.id}</guid>
+      <description>${esc(`Neue Wette von ${e.creator_name}, geplant für ${e.scheduled_time}.`)}</description>${pubDate}
+    </item>`
+        })
+        .join("\n")
+
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>${esc(`${FRIEND_NAME}-Bet`)}</title>
+    <link>${origin}/</link>
+    <description>${esc(`Neue Wetten für ${FRIEND_NAME}-Bet`)}</description>
+${items}
+  </channel>
+</rss>`
+      return new Response(xml, {
+        headers: { "Content-Type": "application/rss+xml; charset=utf-8" },
+      })
+    },
+
     "/api/login": {
       async POST(req) {
         const { username } = await req.json()
@@ -103,7 +148,7 @@ const server = serve({
         const { creator_id, description, scheduled_time } = await req.json()
         const info = db
           .prepare(
-            "INSERT INTO events (creator_id, description, scheduled_time) VALUES (?, ?, ?)",
+            "INSERT INTO events (creator_id, description, scheduled_time, created_at) VALUES (?, ?, ?, unixepoch())",
           )
           .run(creator_id, description, scheduled_time)
 
