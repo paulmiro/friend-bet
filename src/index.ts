@@ -49,6 +49,20 @@ const server = serve({
       return Response.json(user)
     },
 
+    "/api/leaderboard": async () => {
+      const leaderboard = db
+        .prepare(`
+          SELECT DISTINCT u.id, u.username, u.balance
+          FROM users u
+          JOIN bets b ON u.id = b.user_id
+          JOIN events e ON b.event_id = e.id
+          WHERE e.status = 'closed'
+          ORDER BY u.balance DESC, u.username ASC
+        `)
+        .all()
+      return Response.json(leaderboard)
+    },
+
     "/api/stats/:id": async (req) => {
       const userId = req.params.id
       const stats = db

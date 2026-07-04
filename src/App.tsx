@@ -6,6 +6,8 @@ import {
   LogOut,
   CheckCircle2,
   User as UserIcon,
+  Trophy,
+  Home,
 } from "lucide-react"
 
 interface User {
@@ -64,7 +66,7 @@ export function App() {
   const [user, setUser] = useState<User | null>(null)
   const [events, setEvents] = useState<Event[]>([])
   const [view, setView] = useState<
-    "dashboard" | "create" | "account" | "transparency"
+    "dashboard" | "create" | "account" | "transparency" | "leaderboard"
   >("dashboard")
   const [username, setUsername] = useState("")
   const [notification, setNotification] = useState<string | null>(null)
@@ -215,35 +217,58 @@ export function App() {
       )}
 
       <nav className="sticky top-0 bg-slate-900/80 backdrop-blur-md border-b border-slate-800 z-40">
-        <div className="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between">
+        <div className="max-w-6xl mx-auto px-4 py-3 sm:py-4 flex items-center justify-between">
           <h1
             onClick={() => setView("dashboard")}
-            className="text-2xl font-black text-white cursor-pointer hover:text-blue-400 transition-colors"
+            className="text-xl sm:text-2xl font-black text-white cursor-pointer hover:text-blue-400 transition-colors"
           >
             {friendName}-Bet
           </h1>
-          <div className="flex items-center gap-4">
-            <div
-              className="flex items-center gap-2 bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700 cursor-pointer hover:bg-slate-700 transition-colors"
-              onClick={() => setView("account")}
+          <div className="flex items-center gap-2 sm:gap-3">
+            <button
+              onClick={() => setView("dashboard")}
+              className={`text-sm font-bold transition-all flex items-center gap-1.5 h-9 sm:h-10 px-2.5 sm:px-3.5 rounded-xl border ${
+                view === "dashboard"
+                  ? "bg-blue-600/15 border-blue-500/30 text-blue-400"
+                  : "bg-slate-800/40 border-slate-750/30 text-slate-400 hover:bg-slate-800/80 hover:text-slate-200"
+              }`}
+              title="Dashboard"
             >
-              <Wallet size={18} className="text-yellow-500" />
-              <span className="font-bold text-yellow-500">
+              <Home size={18} />
+              <span className="hidden sm:inline">Home</span>
+            </button>
+            <button
+              onClick={() => setView("leaderboard")}
+              className={`text-sm font-bold transition-all flex items-center gap-1.5 h-9 sm:h-10 px-2.5 sm:px-3.5 rounded-xl border ${
+                view === "leaderboard"
+                  ? "bg-blue-600/15 border-blue-500/30 text-blue-400"
+                  : "bg-slate-800/40 border-slate-750/30 text-slate-400 hover:bg-slate-800/80 hover:text-slate-200"
+              }`}
+              title="Leaderboard"
+            >
+              <Trophy size={18} className="text-yellow-500" />
+              <span className="hidden sm:inline">Leaderboard</span>
+            </button>
+            <button
+              onClick={() => setView("account")}
+              className={`text-sm font-bold transition-all flex items-center gap-1.5 h-9 sm:h-10 px-2.5 sm:px-3.5  rounded-xl border ${
+                view === "account"
+                  ? "bg-blue-600/15 border-blue-500/30 text-blue-400"
+                  : "bg-slate-800/40 border-slate-750/30 text-slate-400 hover:bg-slate-800/80 hover:text-slate-200"
+              }`}
+              title="Konto"
+            >
+              <Wallet size={18} className="text-green-500" />
+              <span className="font-bold text-green-500 text-sm sm:text-base">
                 {user.balance} LC
               </span>
-            </div>
-            <div
-              className="hidden sm:flex items-center gap-2 bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700 cursor-pointer hover:bg-slate-700 transition-colors"
-              onClick={() => setView("account")}
-            >
-              <UserIcon size={18} className="text-blue-400" />
-              <span className="font-medium">{user.username}</span>
-            </div>
+            </button>
             <button
               onClick={logout}
-              className="p-2 text-slate-400 hover:text-red-400 transition-colors"
+              className="h-9 w-9 sm:h-10 sm:w-10 bg-slate-800/40 hover:bg-red-950/20 border border-slate-700/30 hover:border-red-900/30 rounded-xl text-slate-400 hover:text-red-400 transition-all flex items-center justify-center"
+              title="Logout"
             >
-              <LogOut size={20} />
+              <LogOut size={18} />
             </button>
           </div>
         </div>
@@ -339,16 +364,23 @@ export function App() {
             onBack={() => setView("dashboard")}
           />
         )}
+        {view === "leaderboard" && <LeaderboardPage currentUser={user} />}
       </main>
 
       <footer className="border-t border-slate-900 mt-20 bg-slate-950 py-12">
         <div className="max-w-6xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-4 text-slate-500 text-sm">
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-6">
             <button
               onClick={() => setView("transparency")}
               className="hover:text-blue-400 transition-colors"
             >
               Transparenz & Formeln
+            </button>
+            <button
+              onClick={() => setView("leaderboard")}
+              className="hover:text-blue-400 transition-colors flex items-center gap-1"
+            >
+              <Trophy size={14} /> Leaderboard
             </button>
           </div>
           <span>© 2026 {friendName}-Bet</span>
@@ -634,7 +666,10 @@ function EventCard({
       const res = await fetch(`/api/events/${event.id}/cancel`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cancel_reason: form.cancel_reason.value, user_id: currentUser.id }),
+        body: JSON.stringify({
+          cancel_reason: form.cancel_reason.value,
+          user_id: currentUser.id,
+        }),
       })
       if (!res.ok) throw new Error((await res.json()).error || "Cancel failed")
       setIsCancelling(false)
@@ -681,7 +716,11 @@ function EventCard({
           <span
             className={`px-2 py-1 rounded-md text-[10px] font-black uppercase tracking-tighter ${event.status === "open" ? "bg-green-500/10 text-green-500" : event.status === "cancelled" ? "bg-red-500/10 text-red-400" : "bg-slate-800 text-slate-500"}`}
           >
-            {event.status === "open" ? "Aktiv" : event.status === "cancelled" ? "Storniert" : "Beendet"}
+            {event.status === "open"
+              ? "Aktiv"
+              : event.status === "cancelled"
+                ? "Storniert"
+                : "Beendet"}
           </span>
         </div>
 
@@ -703,7 +742,9 @@ function EventCard({
           )}
           {event.status === "cancelled" && event.cancel_reason && (
             <div className="flex items-start gap-3 text-red-400 bg-red-500/5 p-3 rounded-xl border border-red-500/20">
-              <span className="text-sm font-bold">Grund: {event.cancel_reason}</span>
+              <span className="text-sm font-bold">
+                Grund: {event.cancel_reason}
+              </span>
             </div>
           )}
         </div>
@@ -943,11 +984,110 @@ function EventCard({
           </div>
         ) : (
           <div className="text-center py-2">
-            <span className={`text-sm font-bold ${event.status === "cancelled" ? "text-red-500" : "text-slate-500"}`}>
-              {event.status === "cancelled" ? "Event Storniert — Einsätze erstattet" : "Event Abgeschlossen"}
+            <span
+              className={`text-sm font-bold ${event.status === "cancelled" ? "text-red-500" : "text-slate-500"}`}
+            >
+              {event.status === "cancelled"
+                ? "Event Storniert — Einsätze erstattet"
+                : "Event Abgeschlossen"}
             </span>
           </div>
         )}
+      </div>
+    </div>
+  )
+}
+
+function LeaderboardPage({ currentUser }: { currentUser: User }) {
+  const [users, setUsers] = useState<User[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    const fetchLeaderboard = async () => {
+      try {
+        const res = await fetch("/api/leaderboard")
+        const data = await res.json()
+        setUsers(data)
+      } catch (err) {
+        console.error(err)
+      } finally {
+        setLoading(false)
+      }
+    }
+    fetchLeaderboard()
+  }, [])
+
+  if (loading) {
+    return <div className="text-center py-20 text-slate-500">Lädt...</div>
+  }
+
+  return (
+    <div className="max-w-2xl mx-auto space-y-8 animate-in fade-in duration-300">
+      <div>
+        <h2 className="text-3xl font-bold text-white flex items-center gap-2">
+          <Trophy className="text-yellow-500" size={32} />
+          Rangliste
+        </h2>
+      </div>
+
+      <div className="bg-slate-900 rounded-3xl border border-slate-800 shadow-xl overflow-hidden">
+        <div className="divide-y divide-slate-800">
+          {users.map((u, index) => {
+            const isTop3 = index < 3
+            const rankColors = [
+              "bg-yellow-500/20 text-yellow-500 border-yellow-500/30",
+              "bg-slate-300/20 text-slate-300 border-slate-300/30",
+              "bg-amber-700/20 text-amber-500 border-amber-700/30",
+            ]
+            const medalEmojis = ["🥇", "🥈", "🥉"]
+            const isCurrentUser = u.id === currentUser.id
+
+            return (
+              <div
+                key={u.id}
+                className={`p-6 flex items-center justify-between hover:bg-slate-800/30 transition-all ${
+                  isCurrentUser
+                    ? "bg-blue-900/10 border-y border-blue-900/50"
+                    : ""
+                }`}
+              >
+                <div className="flex items-center gap-4">
+                  <div
+                    className={`w-10 h-10 rounded-xl flex items-center justify-center font-black border text-lg ${
+                      isTop3
+                        ? rankColors[index]
+                        : "bg-slate-800 text-slate-400 border-slate-700"
+                    }`}
+                  >
+                    {isTop3 ? medalEmojis[index] : index + 1}
+                  </div>
+                  <div>
+                    <span
+                      className={`font-bold text-lg block ${isCurrentUser ? "text-blue-400" : "text-white"}`}
+                    >
+                      {u.username}
+                      {isCurrentUser && (
+                        <span className="ml-2 text-xs bg-blue-500/20 text-blue-400 px-2 py-0.5 rounded font-medium">
+                          Du
+                        </span>
+                      )}
+                    </span>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <span className="text-xl font-black text-yellow-500 block">
+                    {u.balance} LC
+                  </span>
+                </div>
+              </div>
+            )
+          })}
+          {users.length === 0 && (
+            <p className="p-12 text-center text-slate-500">
+              Noch keine Benutzer registriert.
+            </p>
+          )}
+        </div>
       </div>
     </div>
   )
