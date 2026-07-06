@@ -25,7 +25,6 @@
               packages = with pkgs; [
                 bun
                 bun2nix.packages.${system}.default
-                gemini-cli
               ];
             };
           };
