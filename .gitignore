@@ -112,6 +112,8 @@ dist
 # TernJS port file
 .tern-port
 
+#nix
+/result
 
 # direnv
 .direnv/
