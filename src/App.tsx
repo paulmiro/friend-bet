@@ -8,7 +8,13 @@ import {
   User as UserIcon,
   Trophy,
   Home,
+  Lock,
+  LockOpen,
+  MessageSquare,
+  RotateCcw,
+  Undo2,
 } from "lucide-react"
+import { redistribute } from "./payout"
 
 interface User {
   id: number
@@ -25,6 +31,29 @@ interface Event {
   actual_arrival_time: string | null
   status: "open" | "closed" | "cancelled"
   cancel_reason?: string | null
+  created_at?: string | null
+}
+
+/** Freie Wette auf irgendein Thema — der Ersteller verteilt den Pot von Hand. */
+interface TopicEvent {
+  id: number
+  creator_id: number
+  creator_name?: string
+  description: string
+  status: "open" | "resolved" | "refunded"
+  resolution_text: string | null
+  refund_reason: string | null
+  created_at: string
+}
+
+interface TopicBet {
+  id: number
+  topic_event_id: number
+  user_id: number
+  username: string
+  answer: string
+  amount: number
+  payout: number
 }
 
 interface Bet {
@@ -65,11 +94,18 @@ const parseLocalDatetime = (value: string): Date => {
 export function App() {
   const [user, setUser] = useState<User | null>(null)
   const [events, setEvents] = useState<Event[]>([])
+  const [topics, setTopics] = useState<TopicEvent[]>([])
   const [view, setView] = useState<
     "dashboard" | "create" | "account" | "transparency" | "leaderboard"
   >("dashboard")
   const [username, setUsername] = useState("")
+  const [createType, setCreateType] = useState<"punctuality" | "topic">(
+    "punctuality",
+  )
   const [notification, setNotification] = useState<string | null>(null)
+  // Zähler statt Prop-Vergleich: sagt den Karten, dass sie ihre Wetten neu
+  // laden sollen, auch wenn sich das Event selbst nicht verändert hat.
+  const [refreshTick, setRefreshTick] = useState(0)
   const ws = useRef<WebSocket | null>(null)
 
   useEffect(() => {
@@ -81,6 +117,7 @@ export function App() {
       refreshUser(parsedUser.id)
     }
     fetchEvents()
+    fetchTopics()
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:"
     ws.current = new WebSocket(`${protocol}//${window.location.host}/ws`)
@@ -90,6 +127,9 @@ export function App() {
       if (type === "new_event") {
         setEvents((prev) => [data, ...prev])
         showNotification(`New Event: ${data.description}`)
+      } else if (type === "new_topic") {
+        setTopics((prev) => [data, ...prev])
+        showNotification(`Neue Wette: ${data.description}`)
       } else if (
         type === "event_resolved" ||
         type === "event_cancelled" ||
@@ -97,6 +137,14 @@ export function App() {
         type === "bet_placed"
       ) {
         fetchEvents()
+        if (user) refreshUser(user.id)
+      } else if (
+        type === "topic_resolved" ||
+        type === "topic_refunded" ||
+        type === "topic_bet_placed"
+      ) {
+        fetchTopics()
+        setRefreshTick((tick) => tick + 1)
         if (user) refreshUser(user.id)
       }
     }
@@ -132,6 +180,23 @@ export function App() {
     }
   }
 
+  const fetchTopics = async () => {
+    try {
+      const res = await fetch("/api/topics")
+      const data = await res.json()
+      setTopics(data)
+    } catch (err) {
+      console.error(err)
+    }
+  }
+
+  const refreshAll = () => {
+    fetchEvents()
+    fetchTopics()
+    setRefreshTick((tick) => tick + 1)
+    if (user) refreshUser(user.id)
+  }
+
   const login = async (e: React.FormEvent) => {
     e.preventDefault()
     try {
@@ -158,6 +223,22 @@ export function App() {
     e.preventDefault()
     const form = e.target as any
     try {
+      if (createType === "topic") {
+        const res = await fetch("/api/topics", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            creator_id: user?.id,
+            description: form.description.value,
+          }),
+        })
+        if (!res.ok)
+          throw new Error((await res.json()).error || "Failed to create topic")
+        fetchTopics()
+        setView("dashboard")
+        return
+      }
+
       const scheduledTimeLocal = form.scheduled_time.value
       const scheduledTimeUTC =
         parseLocalDatetime(scheduledTimeLocal).toISOString()
@@ -176,6 +257,38 @@ export function App() {
       alert(err.message)
     }
   }
+
+  // Ein gemeinsamer Feed: beide Sorten nach Alter, offene zuerst.
+  const feed = [
+    ...events.map((event) => ({
+      key: `event-${event.id}`,
+      sort: event.created_at ?? event.scheduled_time ?? "",
+      open: event.status === "open",
+      node: (
+        <EventCard
+          event={event}
+          currentUser={user!}
+          friendName={friendName}
+          onUpdate={refreshAll}
+        />
+      ),
+    })),
+    ...topics.map((topic) => ({
+      key: `topic-${topic.id}`,
+      sort: topic.created_at ?? "",
+      open: topic.status === "open",
+      node: (
+        <TopicCard
+          topic={topic}
+          currentUser={user!}
+          refreshTick={refreshTick}
+          onUpdate={refreshAll}
+        />
+      ),
+    })),
+  ].sort(
+    (a, b) => Number(b.open) - Number(a.open) || (a.sort < b.sort ? 1 : -1),
+  )
 
   if (!user) {
     return (
@@ -287,19 +400,10 @@ export function App() {
               </button>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {events.map((event) => (
-                <EventCard
-                  key={event.id}
-                  event={event}
-                  currentUser={user}
-                  friendName={friendName}
-                  onUpdate={() => {
-                    fetchEvents()
-                    refreshUser(user.id)
-                  }}
-                />
+              {feed.map((entry) => (
+                <React.Fragment key={entry.key}>{entry.node}</React.Fragment>
               ))}
-              {events.length === 0 && (
+              {feed.length === 0 && (
                 <div className="col-span-full py-20 text-center bg-slate-900 rounded-3xl border-2 border-dashed border-slate-800">
                   <p className="text-slate-500 text-lg">
                     Keine aktiven Events. Starte eines!
@@ -318,26 +422,66 @@ export function App() {
             <form onSubmit={createEvent} className="space-y-6">
               <div className="space-y-2">
                 <label className="text-sm font-medium text-slate-400">
+                  Art der Wette
+                </label>
+                <div className="flex bg-slate-950 rounded-xl border border-slate-700 overflow-hidden p-1 gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setCreateType("punctuality")}
+                    className={`flex-1 py-2.5 rounded-lg font-bold text-sm transition-colors flex items-center justify-center gap-2 ${
+                      createType === "punctuality"
+                        ? "bg-blue-600 text-white"
+                        : "text-slate-400 hover:text-slate-200"
+                    }`}
+                  >
+                    <Clock size={16} /> Pünktlichkeit
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCreateType("topic")}
+                    className={`flex-1 py-2.5 rounded-lg font-bold text-sm transition-colors flex items-center justify-center gap-2 ${
+                      createType === "topic"
+                        ? "bg-blue-600 text-white"
+                        : "text-slate-400 hover:text-slate-200"
+                    }`}
+                  >
+                    <MessageSquare size={16} /> Freies Thema
+                  </button>
+                </div>
+                <p className="text-xs text-slate-500">
+                  {createType === "punctuality"
+                    ? `Getippt wird die Ankunftszeit. Der Pot wird automatisch nach Genauigkeit verteilt.`
+                    : "Getippt wird mit freiem Text. Du verteilst den Pot am Ende selbst."}
+                </p>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-slate-400">
                   Beschreibung
                 </label>
                 <input
                   name="description"
-                  placeholder={`z.B. ${friendName} kommt zur Mensa`}
+                  placeholder={
+                    createType === "punctuality"
+                      ? `z.B. ${friendName} kommt zur Mensa`
+                      : "z.B. Wer gewinnt heute Abend?"
+                  }
                   className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
                   required
                 />
               </div>
-              <div className="space-y-2">
-                <label className="text-sm font-medium text-slate-400">
-                  Geplante Ankunft
-                </label>
-                <input
-                  name="scheduled_time"
-                  type="datetime-local"
-                  className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl text-white focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
-                  required
-                />
-              </div>
+              {createType === "punctuality" && (
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-slate-400">
+                    Geplante Ankunft
+                  </label>
+                  <input
+                    name="scheduled_time"
+                    type="datetime-local"
+                    className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl text-white focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
+                    required
+                  />
+                </div>
+              )}
               <div className="flex gap-4 pt-4">
                 <button
                   type="button"
@@ -433,6 +577,42 @@ function TransparencyPage({
             ist 4-mal schwerwiegender als eine Abweichung von 1 Minute.
           </div>
         </div>
+      </section>
+
+      <section className="bg-slate-900 p-8 rounded-3xl border border-slate-800 shadow-lg space-y-6">
+        <h3 className="text-2xl font-bold text-white flex items-center gap-3">
+          <div className="w-8 h-8 bg-purple-600 rounded-lg flex items-center justify-center">
+            <MessageSquare size={16} />
+          </div>
+          Freie Wetten
+        </h3>
+        <p className="text-slate-400">
+          Neben Pünktlichkeits-Events gibt es <strong>freie Wetten</strong> auf
+          beliebige Themen. Hier zählt keine Formel: getippt wird mit freiem
+          Text, jeder darf beliebig oft mitwetten (auch mit 0 LC), und am Ende
+          verteilt der Ersteller den Pot von Hand — mit einer kurzen
+          Beschreibung, was tatsächlich passiert ist.
+        </p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="p-4 bg-slate-800/50 rounded-xl border border-slate-700">
+            <strong className="text-white block mb-1">
+              Der Pot bleibt erhalten
+            </strong>
+            Es kann nur genau so viel verteilt werden, wie eingesetzt wurde —
+            keine LC entstehen oder verschwinden.
+          </div>
+          <div className="p-4 bg-slate-800/50 rounded-xl border border-slate-700">
+            <strong className="text-white block mb-1">
+              Schließen statt auflösen
+            </strong>
+            Lässt sich nichts entscheiden, schließt der Ersteller die Wette mit
+            einem Grund — dann bekommt jeder seinen Einsatz zurück.
+          </div>
+        </div>
+        <p className="text-slate-400">
+          Bei freien Wetten darf auch {friendName} selbst mitspielen — die
+          Sperre gilt nur für Wetten auf seine eigene Pünktlichkeit.
+        </p>
       </section>
 
       <section className="space-y-6">
@@ -536,27 +716,32 @@ function AccountOverview({ userId }: { userId: number }) {
                   key={bet.id}
                   className="p-6 flex items-center justify-between hover:bg-slate-800/50 transition-colors"
                 >
-                  <div className="space-y-1">
+                  <div className="space-y-1 min-w-0 pr-4">
                     <span className="text-white font-bold block">
                       {bet.event_description}
                     </span>
                     <span className="text-slate-500 text-sm">
-                      Tipp:{" "}
-                      {new Date(bet.bet_arrival_time).toLocaleTimeString(
-                        "de-DE",
-                        { hour: "2-digit", minute: "2-digit" },
-                      )}
+                      {bet.kind === "topic"
+                        ? `Antwort: "${bet.answer}"`
+                        : `Tipp: ${new Date(
+                            bet.bet_arrival_time,
+                          ).toLocaleTimeString("de-DE", {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })}`}
                     </span>
                   </div>
-                  <div className="text-right space-y-1">
+                  <div className="text-right space-y-1 shrink-0">
                     <span className="text-slate-400 font-medium block">
                       -{bet.amount} LC
                     </span>
-                    {bet.event_status === "cancelled" ? (
+                    {bet.event_status === "cancelled" ||
+                    bet.event_status === "refunded" ? (
                       <span className="text-red-400 text-sm font-bold bg-red-500/10 px-2 py-0.5 rounded">
                         Erstattet
                       </span>
-                    ) : bet.actual_arrival_time ? (
+                    ) : bet.actual_arrival_time ||
+                      bet.event_status === "resolved" ? (
                       <span
                         className={`font-bold ${bet.payout > 0 ? "text-green-400" : "text-slate-600"}`}
                       >
@@ -713,15 +898,20 @@ function EventCard({
               </span>
             )}
           </div>
-          <span
-            className={`px-2 py-1 rounded-md text-[10px] font-black uppercase tracking-tighter ${event.status === "open" ? "bg-green-500/10 text-green-500" : event.status === "cancelled" ? "bg-red-500/10 text-red-400" : "bg-slate-800 text-slate-500"}`}
-          >
-            {event.status === "open"
-              ? "Aktiv"
-              : event.status === "cancelled"
-                ? "Storniert"
-                : "Beendet"}
-          </span>
+          <div className="flex flex-col items-end gap-1.5 shrink-0">
+            <span
+              className={`px-2 py-1 rounded-md text-[10px] font-black uppercase tracking-tighter ${event.status === "open" ? "bg-green-500/10 text-green-500" : event.status === "cancelled" ? "bg-red-500/10 text-red-400" : "bg-slate-800 text-slate-500"}`}
+            >
+              {event.status === "open"
+                ? "Aktiv"
+                : event.status === "cancelled"
+                  ? "Storniert"
+                  : "Beendet"}
+            </span>
+            <span className="flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-black uppercase tracking-tighter bg-blue-500/10 text-blue-400">
+              <Clock size={10} /> Pünktlich
+            </span>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 gap-3">
@@ -994,6 +1184,579 @@ function EventCard({
           </div>
         )}
       </div>
+    </div>
+  )
+}
+
+function TopicCard({
+  topic,
+  currentUser,
+  refreshTick,
+  onUpdate,
+}: {
+  topic: TopicEvent
+  currentUser: User
+  refreshTick: number
+  onUpdate: () => void
+}) {
+  const [bets, setBets] = useState<TopicBet[]>([])
+  const [showBetForm, setShowBetForm] = useState(false)
+  const [isResolving, setIsResolving] = useState(false)
+  const [isRefunding, setIsRefunding] = useState(false)
+
+  useEffect(() => {
+    fetchBets()
+  }, [topic.id, topic.status, refreshTick])
+
+  const fetchBets = async () => {
+    try {
+      const res = await fetch(`/api/topics/${topic.id}/bets`)
+      setBets(await res.json())
+    } catch (err) {
+      console.error(err)
+    }
+  }
+
+  const placeBet = async (e: React.FormEvent) => {
+    e.preventDefault()
+    const form = e.target as any
+    try {
+      const res = await fetch(`/api/topics/${topic.id}/bets`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user_id: currentUser.id,
+          answer: form.answer.value,
+          amount: parseInt(form.amount.value, 10),
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || "Bet failed")
+      setShowBetForm(false)
+      fetchBets()
+      onUpdate()
+    } catch (err: any) {
+      alert(err.message)
+    }
+  }
+
+  const refundTopic = async (e: React.FormEvent) => {
+    e.preventDefault()
+    const form = e.target as any
+    try {
+      const res = await fetch(`/api/topics/${topic.id}/refund`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user_id: currentUser.id,
+          refund_reason: form.refund_reason.value,
+        }),
+      })
+      if (!res.ok) throw new Error((await res.json()).error || "Refund failed")
+      setIsRefunding(false)
+      onUpdate()
+    } catch (err: any) {
+      alert(err.message)
+    }
+  }
+
+  const isCreator = currentUser.id === topic.creator_id
+  const pot = bets.reduce((sum, bet) => sum + bet.amount, 0)
+  const hasBet = bets.some((bet) => bet.user_id === currentUser.id)
+
+  return (
+    <div
+      className={`group relative bg-slate-900 rounded-3xl border shadow-xl overflow-hidden transition-all ${topic.status === "refunded" ? "border-red-900/50 opacity-75" : "border-slate-800 hover:border-slate-700"} ${topic.status !== "open" ? "opacity-75" : ""}`}
+    >
+      <div className="p-6 space-y-6">
+        <div className="flex justify-between items-start gap-3">
+          <div className="space-y-1">
+            <h3 className="text-xl font-bold text-white group-hover:text-blue-400 transition-colors">
+              {topic.description}
+            </h3>
+            {topic.creator_name && (
+              <span className="text-xs font-bold text-slate-500 uppercase tracking-widest">
+                Von {topic.creator_name}
+              </span>
+            )}
+          </div>
+          <div className="flex flex-col items-end gap-1.5 shrink-0">
+            <span
+              className={`px-2 py-1 rounded-md text-[10px] font-black uppercase tracking-tighter ${topic.status === "open" ? "bg-green-500/10 text-green-500" : topic.status === "refunded" ? "bg-red-500/10 text-red-400" : "bg-slate-800 text-slate-500"}`}
+            >
+              {topic.status === "open"
+                ? "Aktiv"
+                : topic.status === "refunded"
+                  ? "Erstattet"
+                  : "Aufgelöst"}
+            </span>
+            <span className="flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-black uppercase tracking-tighter bg-purple-500/10 text-purple-400">
+              <MessageSquare size={10} /> Frei
+            </span>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 gap-3">
+          <div className="flex items-center gap-3 text-slate-400 bg-slate-950/50 p-3 rounded-xl border border-slate-800">
+            <Wallet size={16} className="text-blue-500" />
+            <span className="text-sm">
+              Pot: <strong className="text-white">{pot} LC</strong>
+            </span>
+          </div>
+          {topic.status === "resolved" && topic.resolution_text && (
+            <div className="flex items-start gap-3 text-green-400 bg-green-500/5 p-3 rounded-xl border border-green-500/20">
+              <CheckCircle2 size={16} className="shrink-0 mt-0.5" />
+              <span className="text-sm font-bold">{topic.resolution_text}</span>
+            </div>
+          )}
+          {topic.status === "refunded" && topic.refund_reason && (
+            <div className="flex items-start gap-3 text-red-400 bg-red-500/5 p-3 rounded-xl border border-red-500/20">
+              <span className="text-sm font-bold">
+                Grund: {topic.refund_reason}
+              </span>
+            </div>
+          )}
+        </div>
+
+        <div className="space-y-3">
+          <h4 className="text-sm font-bold text-slate-500 uppercase tracking-widest">
+            Wetten ({bets.length})
+          </h4>
+          <div className="space-y-2 max-h-60 overflow-y-auto pr-2 custom-scrollbar">
+            {bets.map((bet) => (
+              <div
+                key={bet.id}
+                className="bg-slate-950/50 rounded-2xl border border-slate-800/50 p-4 space-y-2"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <span className="font-bold text-white text-sm truncate">
+                    {bet.username}
+                  </span>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <span className="font-black text-blue-400 text-sm">
+                      {bet.amount} LC
+                    </span>
+                    {topic.status === "resolved" && (
+                      <span
+                        className={`text-sm font-black ${bet.payout - bet.amount > 0 ? "text-green-400" : bet.payout - bet.amount < 0 ? "text-red-400" : "text-slate-500"}`}
+                      >
+                        {bet.payout - bet.amount > 0 ? "+" : ""}
+                        {bet.payout - bet.amount}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <p className="text-xs text-slate-400 italic break-words">
+                  " {bet.answer} "
+                </p>
+              </div>
+            ))}
+            {bets.length === 0 && (
+              <p className="text-sm text-slate-600 py-2">
+                Noch keine Wetten abgegeben.
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="p-6 bg-slate-800/30 border-t border-slate-800">
+        {topic.status === "open" ? (
+          <div className="space-y-4">
+            {!showBetForm && !isRefunding && (
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setShowBetForm(true)}
+                  className="flex-1 py-3 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl shadow-lg transition-all active:scale-95"
+                >
+                  {hasBet ? "Nochmal wetten" : "Wetten"}
+                </button>
+                {isCreator && (
+                  <button
+                    onClick={() => setIsResolving(true)}
+                    className="flex-1 py-3 bg-slate-800 hover:bg-slate-700 text-white font-bold rounded-xl transition-all active:scale-95"
+                  >
+                    Auflösen
+                  </button>
+                )}
+                {isCreator && (
+                  <button
+                    onClick={() => setIsRefunding(true)}
+                    className="py-3 px-4 bg-red-900/30 hover:bg-red-900/50 text-red-400 font-bold rounded-xl transition-all active:scale-95 border border-red-900/50"
+                    title="Schließen & alles erstatten"
+                  >
+                    <Undo2 size={18} />
+                  </button>
+                )}
+              </div>
+            )}
+
+            {showBetForm && (
+              <form
+                onSubmit={placeBet}
+                className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300"
+              >
+                <input
+                  name="answer"
+                  type="text"
+                  placeholder="Deine Antwort..."
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white"
+                  required
+                  autoFocus
+                />
+                <div className="flex items-center gap-2">
+                  <input
+                    name="amount"
+                    type="number"
+                    defaultValue={0}
+                    placeholder="Einsatz (LC)"
+                    className="flex-1 px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white"
+                    required
+                    min="0"
+                    max={currentUser.balance}
+                  />
+                  <span className="text-xs text-slate-500 whitespace-nowrap">
+                    von {currentUser.balance} LC
+                  </span>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    type="submit"
+                    className="flex-1 py-2 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-lg transition-all"
+                  >
+                    Go
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowBetForm(false)}
+                    className="flex-1 py-2 bg-slate-800 text-slate-400 font-bold rounded-lg transition-all"
+                  >
+                    Stop
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {isRefunding && (
+              <form
+                onSubmit={refundTopic}
+                className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300"
+              >
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black text-red-500 uppercase tracking-widest">
+                    Grund für das Schließen:
+                  </label>
+                  <input
+                    name="refund_reason"
+                    type="text"
+                    placeholder="z.B. lässt sich nicht entscheiden"
+                    className="w-full px-3 py-2 bg-slate-950 border border-red-900/50 rounded-lg text-sm text-white"
+                    required
+                    autoFocus
+                  />
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    type="submit"
+                    className="flex-1 py-2 bg-red-700 hover:bg-red-600 text-white font-bold rounded-lg transition-all"
+                  >
+                    Schließen & erstatten
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsRefunding(false)}
+                    className="flex-1 py-2 bg-slate-800 text-slate-400 font-bold rounded-lg transition-all"
+                  >
+                    Abbruch
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
+        ) : (
+          <div className="text-center py-2">
+            <span
+              className={`text-sm font-bold ${topic.status === "refunded" ? "text-red-500" : "text-slate-500"}`}
+            >
+              {topic.status === "refunded"
+                ? "Geschlossen — Einsätze erstattet"
+                : "Wette aufgelöst"}
+            </span>
+          </div>
+        )}
+      </div>
+
+      {isResolving && (
+        <ResolveTopicModal
+          topic={topic}
+          bets={bets}
+          currentUser={currentUser}
+          onClose={() => setIsResolving(false)}
+          onResolved={() => {
+            setIsResolving(false)
+            onUpdate()
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+/**
+ * Der Auflösen-Dialog: den Pot von Hand auf die Mitspieler verteilen.
+ *
+ * Vorbelegt ist der Zustand "jeder bekommt seinen Einsatz zurück", damit man
+ * meist nur eine Kleinigkeit ändern muss. Die Slider gleichen sich gegenseitig
+ * aus, gesperrte Zeilen bleiben stehen — die Summe ist immer exakt der Pot.
+ */
+function ResolveTopicModal({
+  topic,
+  bets,
+  currentUser,
+  onClose,
+  onResolved,
+}: {
+  topic: TopicEvent
+  bets: TopicBet[]
+  currentUser: User
+  onClose: () => void
+  onResolved: () => void
+}) {
+  // Bewusst eingefroren: verteilt wird auf den Stand beim Öffnen. Kommt
+  // zwischendurch eine Wette dazu, lehnt der Server ab statt still umzurechnen.
+  const [snapshot] = useState(() => bets)
+
+  const participants = React.useMemo(() => {
+    const byUser = new Map<
+      number,
+      { user_id: number; username: string; stake: number }
+    >()
+    for (const bet of snapshot) {
+      const entry = byUser.get(bet.user_id) ?? {
+        user_id: bet.user_id,
+        username: bet.username,
+        stake: 0,
+      }
+      entry.stake += bet.amount
+      byUser.set(bet.user_id, entry)
+    }
+    return [...byUser.values()].sort((a, b) => b.stake - a.stake)
+  }, [snapshot])
+
+  const pot = participants.reduce((sum, p) => sum + p.stake, 0)
+  const refundSplit = () =>
+    Object.fromEntries(participants.map((p) => [p.user_id, p.stake]))
+
+  const [alloc, setAlloc] = useState<Record<number, number>>(refundSplit)
+  const [locked, setLocked] = useState<ReadonlySet<number>>(new Set())
+  const [resolutionText, setResolutionText] = useState("")
+  const [busy, setBusy] = useState(false)
+
+  const assigned = participants.reduce(
+    (sum, p) => sum + (alloc[p.user_id] ?? 0),
+    0,
+  )
+
+  const setValue = (userId: number, value: number) =>
+    setAlloc((prev) => redistribute(prev, userId, value, locked, pot))
+
+  const giveAll = (userId: number) => {
+    setLocked(new Set())
+    setAlloc(
+      Object.fromEntries(
+        participants.map((p) => [p.user_id, p.user_id === userId ? pot : 0]),
+      ),
+    )
+  }
+
+  const toggleLock = (userId: number) =>
+    setLocked((prev) => {
+      const next = new Set(prev)
+      if (next.has(userId)) next.delete(userId)
+      else next.add(userId)
+      return next
+    })
+
+  const reset = () => {
+    setLocked(new Set())
+    setAlloc(refundSplit())
+  }
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setBusy(true)
+    try {
+      const res = await fetch(`/api/topics/${topic.id}/resolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user_id: currentUser.id,
+          resolution_text: resolutionText,
+          allocations: participants.map((p) => ({
+            user_id: p.user_id,
+            amount: alloc[p.user_id] ?? 0,
+          })),
+        }),
+      })
+      if (!res.ok) throw new Error((await res.json()).error || "Resolve failed")
+      onResolved()
+    } catch (err: any) {
+      alert(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-end sm:items-center justify-center sm:p-4 animate-in fade-in duration-200"
+      onClick={onClose}
+    >
+      <form
+        onSubmit={submit}
+        onClick={(e) => e.stopPropagation()}
+        className="w-full sm:max-w-lg max-h-[92vh] sm:max-h-[85vh] flex flex-col bg-slate-900 border border-slate-800 rounded-t-3xl sm:rounded-3xl shadow-2xl animate-in slide-in-from-bottom-4 duration-300"
+      >
+        <div className="p-6 pb-4 space-y-4 border-b border-slate-800">
+          <div>
+            <h3 className="text-xl font-bold text-white">Wette auflösen</h3>
+            <p className="text-sm text-slate-500 mt-0.5">{topic.description}</p>
+          </div>
+          <div className="space-y-1">
+            <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">
+              Was ist passiert?
+            </label>
+            <input
+              value={resolutionText}
+              onChange={(e) => setResolutionText(e.target.value)}
+              placeholder="z.B. Bayern hat 2:1 gewonnen"
+              className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+              required
+              autoFocus
+            />
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-6 space-y-3 custom-scrollbar">
+          {participants.length === 0 && (
+            <p className="text-center text-slate-500 py-6 text-sm">
+              Es wurden keine Wetten abgegeben — hier gibt es nichts zu
+              verteilen.
+            </p>
+          )}
+          {participants.map((p) => {
+            const value = alloc[p.user_id] ?? 0
+            const delta = value - p.stake
+            const isLocked = locked.has(p.user_id)
+            return (
+              <div
+                key={p.user_id}
+                className={`rounded-2xl border p-4 space-y-3 transition-colors ${isLocked ? "bg-blue-950/20 border-blue-800/40" : "bg-slate-950/50 border-slate-800/50"}`}
+              >
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="font-bold text-white truncate">
+                    {p.username}
+                  </span>
+                  <span className="text-xs text-slate-500 shrink-0">
+                    Einsatz {p.stake} LC
+                    {delta !== 0 && (
+                      <span
+                        className={`ml-1.5 font-black ${delta > 0 ? "text-green-400" : "text-red-400"}`}
+                      >
+                        {delta > 0 ? "+" : ""}
+                        {delta}
+                      </span>
+                    )}
+                  </span>
+                </div>
+
+                <input
+                  type="range"
+                  min={0}
+                  max={Math.max(pot, 1)}
+                  value={value}
+                  disabled={pot === 0 || isLocked}
+                  onChange={(e) => setValue(p.user_id, Number(e.target.value))}
+                  style={
+                    {
+                      "--pot-pct": `${pot > 0 ? (value / pot) * 100 : 0}%`,
+                    } as React.CSSProperties
+                  }
+                  className="pot-slider"
+                />
+
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min={0}
+                    max={pot}
+                    value={value}
+                    disabled={pot === 0 || isLocked}
+                    onChange={(e) =>
+                      setValue(p.user_id, Number(e.target.value) || 0)
+                    }
+                    onFocus={(e) => e.target.select()}
+                    className="w-20 px-2 py-2 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white text-center disabled:opacity-40"
+                  />
+                  <span className="text-xs text-slate-500">LC</span>
+                  <button
+                    type="button"
+                    onClick={() => giveAll(p.user_id)}
+                    disabled={pot === 0}
+                    className="flex-1 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-bold rounded-lg transition-all active:scale-95 disabled:opacity-40"
+                  >
+                    Alles
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => toggleLock(p.user_id)}
+                    title={isLocked ? "Entsperren" : "Wert festhalten"}
+                    className={`h-9 w-9 shrink-0 rounded-lg border flex items-center justify-center transition-all ${isLocked ? "bg-blue-600/20 border-blue-500/40 text-blue-400" : "bg-slate-800/60 border-slate-700 text-slate-500 hover:text-slate-300"}`}
+                  >
+                    {isLocked ? <Lock size={16} /> : <LockOpen size={16} />}
+                  </button>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+
+        <div className="p-6 pt-4 border-t border-slate-800 space-y-3">
+          <div className="flex items-center justify-between">
+            <button
+              type="button"
+              onClick={reset}
+              className="flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-slate-300 transition-colors"
+            >
+              <RotateCcw size={14} /> Zurücksetzen
+            </button>
+            <span className="text-sm">
+              <span className="text-slate-500">Verteilt </span>
+              <span
+                className={`font-black ${assigned === pot ? "text-green-400" : "text-red-400"}`}
+              >
+                {assigned} / {pot} LC
+              </span>
+            </span>
+          </div>
+          <div className="flex gap-2">
+            <button
+              type="submit"
+              disabled={busy || assigned !== pot}
+              className="flex-1 py-3 bg-green-600 hover:bg-green-500 text-white font-bold rounded-xl transition-all active:scale-95 disabled:opacity-40 disabled:active:scale-100"
+            >
+              Auszahlen
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="flex-1 py-3 bg-slate-800 hover:bg-slate-700 text-slate-400 font-bold rounded-xl transition-all"
+            >
+              Abbruch
+            </button>
+          </div>
+        </div>
+      </form>
     </div>
   )
 }
