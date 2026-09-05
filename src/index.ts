@@ -9,6 +9,19 @@ if (!FRIEND_NAME) {
   process.exit(1)
 }
 
+// Optional. Wer hier drinsteht, darf fremde Events verwalten und Konten
+// bearbeiten. Bewusst nur eine Umgebungsvariable — in der DB steht nirgends,
+// wer Admin ist, und ohne die Variable gibt es schlicht keinen.
+const ADMIN_NAME = process.env.FRIEND_BET_ADMIN
+
+const isAdmin = (userId: unknown) => {
+  if (!ADMIN_NAME) return false
+  const user = db
+    .prepare("SELECT username FROM users WHERE id = ?")
+    .get(userId as any) as any
+  return !!user && user.username.toLowerCase() === ADMIN_NAME.toLowerCase()
+}
+
 const server = serve({
   port: parseInt(process.env.FRIEND_BET_PORT || "3000"),
   routes: {
@@ -50,25 +63,31 @@ const server = serve({
       return Response.json(user)
     },
 
-    "/api/leaderboard": async () => {
+    "/api/leaderboard": async (req) => {
+      // Normalerweise nur Mitspieler mit abgeschlossenen Wetten. Ein Admin
+      // sieht zusätzlich die inaktiven Konten (active = 0).
+      const adminId = new URL(req.url).searchParams.get("admin_id")
+      const showAll = adminId !== null && isAdmin(adminId)
+
       const leaderboard = db
         .prepare(`
-          SELECT u.id, u.username, u.balance
-          FROM users u
-          WHERE u.id IN (
-            SELECT b.user_id
-            FROM bets b
-            JOIN events e ON b.event_id = e.id
-            WHERE e.status = 'closed'
-            UNION
-            SELECT tb.user_id
-            FROM topic_bets tb
-            JOIN topic_events te ON tb.topic_event_id = te.id
-            WHERE te.status != 'open'
+          SELECT id, username, balance, active FROM (
+            SELECT u.id, u.username, u.balance,
+              CASE WHEN EXISTS (
+                SELECT 1 FROM bets b
+                JOIN events e ON b.event_id = e.id
+                WHERE b.user_id = u.id AND e.status = 'closed'
+              ) OR EXISTS (
+                SELECT 1 FROM topic_bets tb
+                JOIN topic_events te ON tb.topic_event_id = te.id
+                WHERE tb.user_id = u.id AND te.status != 'open'
+              ) THEN 1 ELSE 0 END as active
+            FROM users u
           )
-          ORDER BY u.balance DESC, u.username ASC
+          WHERE ? = 1 OR active = 1
+          ORDER BY balance DESC, username ASC
         `)
-        .all()
+        .all(showAll ? 1 : 0)
       return Response.json(leaderboard)
     },
 
@@ -326,7 +345,7 @@ const server = serve({
           .get(eventId) as any
         if (!event || event.status !== "open")
           return Response.json({ error: "Invalid event" }, { status: 400 })
-        if (event.creator_id !== user_id)
+        if (event.creator_id !== user_id && !isAdmin(user_id))
           return Response.json({ error: "Nur der Ersteller kann stornieren." }, { status: 403 })
         if (!cancel_reason?.trim())
           return Response.json({ error: "Grund ist erforderlich." }, { status: 400 })
@@ -591,7 +610,7 @@ const server = serve({
             { error: "Dieses Thema ist bereits abgeschlossen." },
             { status: 400 },
           )
-        if (topic.creator_id !== user_id)
+        if (topic.creator_id !== user_id && !isAdmin(user_id))
           return Response.json(
             { error: "Nur der Ersteller kann auflösen." },
             { status: 403 },
@@ -693,7 +712,7 @@ const server = serve({
             { error: "Dieses Thema ist bereits abgeschlossen." },
             { status: 400 },
           )
-        if (topic.creator_id !== user_id)
+        if (topic.creator_id !== user_id && !isAdmin(user_id))
           return Response.json(
             { error: "Nur der Ersteller kann schließen." },
             { status: 403 },
@@ -734,6 +753,113 @@ const server = serve({
         return Response.json({ success: true })
       },
     },
+
+    // ── Admin ──────────────────────────────────────────────────────────────
+    // Nur erreichbar, wenn FRIEND_BET_ADMIN gesetzt ist und die mitgeschickte
+    // user_id genau diesem Namen gehört.
+
+    "/api/admin/users/:id/balance": {
+      async POST(req) {
+        const { admin_id, balance } = await req.json()
+        if (!isAdmin(admin_id))
+          return Response.json({ error: "Keine Admin-Rechte." }, { status: 403 })
+
+        if (!Number.isInteger(balance) || balance < 0)
+          return Response.json(
+            { error: "Kontostand muss eine ganze Zahl ab 0 sein." },
+            { status: 400 },
+          )
+
+        const target = db
+          .prepare("SELECT * FROM users WHERE id = ?")
+          .get(req.params.id) as any
+        if (!target)
+          return Response.json(
+            { error: "Unbekannter Benutzer." },
+            { status: 404 },
+          )
+
+        db.prepare("UPDATE users SET balance = ? WHERE id = ?").run(
+          balance,
+          req.params.id,
+        )
+
+        server.publish(
+          "updates",
+          JSON.stringify({
+            type: "admin_update",
+            data: { user_id: target.id },
+          }),
+        )
+        return Response.json({ success: true })
+      },
+    },
+
+    "/api/admin/users/:id/delete": {
+      async POST(req) {
+        const { admin_id, confirm_username } = await req.json()
+        if (!isAdmin(admin_id))
+          return Response.json({ error: "Keine Admin-Rechte." }, { status: 403 })
+
+        const target = db
+          .prepare("SELECT * FROM users WHERE id = ?")
+          .get(req.params.id) as any
+        if (!target)
+          return Response.json(
+            { error: "Unbekannter Benutzer." },
+            { status: 404 },
+          )
+
+        if (target.id === admin_id)
+          return Response.json(
+            { error: "Du kannst dich nicht selbst löschen." },
+            { status: 400 },
+          )
+
+        if (
+          confirm_username?.trim().toLowerCase() !==
+          target.username.toLowerCase()
+        )
+          return Response.json(
+            { error: "Benutzername stimmt nicht überein." },
+            { status: 400 },
+          )
+
+        // Nur ungenutzte Konten: sobald jemand gewettet oder ein Event
+        // erstellt hat, hängt fremde Historie daran. Die bliebe beim Löschen
+        // als Leiche zurück, also lieber gar nicht erst anfangen.
+        const usage = db
+          .prepare(
+            `
+          SELECT
+            (SELECT COUNT(*) FROM bets WHERE user_id = ?1)
+            + (SELECT COUNT(*) FROM topic_bets WHERE user_id = ?1) as bets,
+            (SELECT COUNT(*) FROM events WHERE creator_id = ?1)
+            + (SELECT COUNT(*) FROM topic_events WHERE creator_id = ?1) as events
+        `,
+          )
+          .get(target.id) as any
+
+        if (usage.bets > 0 || usage.events > 0)
+          return Response.json(
+            {
+              error: `${target.username} hat bereits mitgespielt (${usage.bets} Wetten, ${usage.events} Events) und kann nicht gelöscht werden.`,
+            },
+            { status: 400 },
+          )
+
+        db.prepare("DELETE FROM users WHERE id = ?").run(target.id)
+
+        server.publish(
+          "updates",
+          JSON.stringify({
+            type: "admin_update",
+            data: { user_id: target.id },
+          }),
+        )
+        return Response.json({ success: true })
+      },
+    },
   },
 
   websocket: {
@@ -753,3 +879,4 @@ const server = serve({
 })
 
 console.log(`🚀 ${FRIEND_NAME}-Bet Server running at ${server.url}`)
+if (ADMIN_NAME) console.log(`🔑 Admin: ${ADMIN_NAME}`)
