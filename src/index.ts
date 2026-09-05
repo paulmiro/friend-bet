@@ -1,5 +1,6 @@
 import { serve } from "bun"
 import { db } from "./db"
+import { splitAcrossBets } from "./payout"
 import indexHtml from "./index.html"
 
 const FRIEND_NAME = process.env.FRIEND_BET_NAME
@@ -52,11 +53,19 @@ const server = serve({
     "/api/leaderboard": async () => {
       const leaderboard = db
         .prepare(`
-          SELECT DISTINCT u.id, u.username, u.balance
+          SELECT u.id, u.username, u.balance
           FROM users u
-          JOIN bets b ON u.id = b.user_id
-          JOIN events e ON b.event_id = e.id
-          WHERE e.status = 'closed'
+          WHERE u.id IN (
+            SELECT b.user_id
+            FROM bets b
+            JOIN events e ON b.event_id = e.id
+            WHERE e.status = 'closed'
+            UNION
+            SELECT tb.user_id
+            FROM topic_bets tb
+            JOIN topic_events te ON tb.topic_event_id = te.id
+            WHERE te.status != 'open'
+          )
           ORDER BY u.balance DESC, u.username ASC
         `)
         .all()
@@ -79,6 +88,20 @@ const server = serve({
         )
         .get(userId, userId)
 
+      const topicStats = db
+        .prepare(
+          `
+        SELECT
+          COUNT(*) as total_bets,
+          SUM(amount) as total_wagered,
+          SUM(payout) as total_payout,
+          (SELECT COUNT(*) FROM topic_bets tb2 JOIN topic_events te ON tb2.topic_event_id = te.id WHERE tb2.user_id = ? AND te.status != 'open') as resolved_bets
+        FROM topic_bets
+        WHERE user_id = ?
+      `,
+        )
+        .get(userId, userId) as any
+
       const history = db
         .prepare(
           `
@@ -87,6 +110,7 @@ const server = serve({
           e.description as event_description,
           e.actual_arrival_time,
           e.scheduled_time,
+          e.created_at,
           e.status as event_status
         FROM bets b
         JOIN events e ON b.event_id = e.id
@@ -94,9 +118,49 @@ const server = serve({
         ORDER BY b.id DESC
       `,
         )
-        .all(userId)
+        .all(userId) as any[]
 
-      return Response.json({ stats, history })
+      const topicHistory = db
+        .prepare(
+          `
+        SELECT
+          tb.*,
+          te.description as event_description,
+          te.resolution_text,
+          te.refund_reason,
+          te.status as event_status
+        FROM topic_bets tb
+        JOIN topic_events te ON tb.topic_event_id = te.id
+        WHERE tb.user_id = ?
+        ORDER BY tb.id DESC
+      `,
+        )
+        .all(userId) as any[]
+
+      const add = (a: number | null, b: number | null) => (a || 0) + (b || 0)
+      const mergedStats = {
+        total_bets: add((stats as any).total_bets, topicStats.total_bets),
+        total_wagered: add(
+          (stats as any).total_wagered,
+          topicStats.total_wagered,
+        ),
+        total_payout: add((stats as any).total_payout, topicStats.total_payout),
+        resolved_bets: add(
+          (stats as any).resolved_bets,
+          topicStats.resolved_bets,
+        ),
+      }
+
+      // Pünktlichkeits-Wetten haben keinen eigenen Zeitstempel; für die
+      // gemeinsame Sortierung tut es das geplante Datum des Events.
+      const sortKey = (row: any) =>
+        row.created_at ?? row.scheduled_time ?? "0000"
+      const mergedHistory = [
+        ...history.map((row) => ({ ...row, kind: "punctuality" })),
+        ...topicHistory.map((row) => ({ ...row, kind: "topic" })),
+      ].sort((a, b) => (sortKey(a) < sortKey(b) ? 1 : -1))
+
+      return Response.json({ stats: mergedStats, history: mergedHistory })
     },
 
     "/api/events": {
@@ -115,19 +179,24 @@ const server = serve({
       },
       async POST(req) {
         const { creator_id, description, scheduled_time } = await req.json()
+        // created_at explizit: bei migrierten DBs hat die Spalte keinen
+        // Default (SQLite erlaubt das bei ALTER TABLE nicht).
         const info = db
           .prepare(
-            "INSERT INTO events (creator_id, description, scheduled_time) VALUES (?, ?, ?)",
+            "INSERT INTO events (creator_id, description, scheduled_time, created_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
           )
           .run(creator_id, description, scheduled_time)
 
-        const newEvent = {
-          id: info.lastInsertRowid,
-          creator_id,
-          description,
-          scheduled_time,
-          status: "open",
-        }
+        const newEvent = db
+          .prepare(
+            `
+          SELECT events.*, users.username as creator_name
+          FROM events
+          JOIN users ON events.creator_id = users.id
+          WHERE events.id = ?
+        `,
+          )
+          .get(info.lastInsertRowid)
         server.publish(
           "updates",
           JSON.stringify({ type: "new_event", data: newEvent }),
@@ -361,6 +430,305 @@ const server = serve({
           JSON.stringify({
             type: "event_resolved",
             data: { event_id: eventId, actual_arrival_time },
+          }),
+        )
+        return Response.json({ success: true })
+      },
+    },
+
+    // ── Freie Themen-Wetten ────────────────────────────────────────────────
+    // Kein FRIEND_NAME-Sonderfall: hier spielt der Namensgeber ganz normal mit.
+
+    "/api/topics": {
+      async GET() {
+        const topics = db
+          .prepare(
+            `
+          SELECT topic_events.*, users.username as creator_name
+          FROM topic_events
+          JOIN users ON topic_events.creator_id = users.id
+          ORDER BY topic_events.id DESC
+        `,
+          )
+          .all()
+        return Response.json(topics)
+      },
+      async POST(req) {
+        const { creator_id, description } = await req.json()
+
+        const creator = db
+          .prepare("SELECT id FROM users WHERE id = ?")
+          .get(creator_id)
+        if (!creator)
+          return Response.json(
+            { error: "Unbekannter Benutzer." },
+            { status: 400 },
+          )
+        if (!description?.trim())
+          return Response.json(
+            { error: "Beschreibung ist erforderlich." },
+            { status: 400 },
+          )
+
+        const info = db
+          .prepare(
+            "INSERT INTO topic_events (creator_id, description) VALUES (?, ?)",
+          )
+          .run(creator_id, description.trim())
+
+        const newTopic = db
+          .prepare(
+            `
+          SELECT topic_events.*, users.username as creator_name
+          FROM topic_events
+          JOIN users ON topic_events.creator_id = users.id
+          WHERE topic_events.id = ?
+        `,
+          )
+          .get(info.lastInsertRowid)
+
+        server.publish(
+          "updates",
+          JSON.stringify({ type: "new_topic", data: newTopic }),
+        )
+        return Response.json(newTopic)
+      },
+    },
+
+    "/api/topics/:id/bets": {
+      async GET(req) {
+        const bets = db
+          .prepare(
+            `
+          SELECT topic_bets.*, users.username
+          FROM topic_bets
+          JOIN users ON topic_bets.user_id = users.id
+          WHERE topic_event_id = ?
+          ORDER BY topic_bets.id ASC
+        `,
+          )
+          .all(req.params.id)
+        return Response.json(bets)
+      },
+      async POST(req) {
+        const { user_id, answer, amount } = await req.json()
+        const topicId = req.params.id
+
+        const topic = db
+          .prepare("SELECT * FROM topic_events WHERE id = ?")
+          .get(topicId) as any
+        if (!topic)
+          return Response.json(
+            { error: "Unbekanntes Thema." },
+            { status: 404 },
+          )
+        if (topic.status !== "open")
+          return Response.json(
+            { error: "Dieses Thema ist bereits abgeschlossen." },
+            { status: 400 },
+          )
+
+        const user = db
+          .prepare("SELECT * FROM users WHERE id = ?")
+          .get(user_id) as any
+        if (!user)
+          return Response.json(
+            { error: "Unbekannter Benutzer." },
+            { status: 400 },
+          )
+
+        if (!answer?.trim())
+          return Response.json(
+            { error: "Antwort ist erforderlich." },
+            { status: 400 },
+          )
+        // 0 ist ausdrücklich erlaubt — man darf ohne Einsatz mitraten.
+        if (!Number.isInteger(amount) || amount < 0)
+          return Response.json(
+            { error: "Einsatz muss eine ganze Zahl ab 0 sein." },
+            { status: 400 },
+          )
+        if (amount > user.balance)
+          return Response.json(
+            { error: "Nicht genug LC." },
+            { status: 400 },
+          )
+
+        const transaction = db.transaction(() => {
+          db.prepare("UPDATE users SET balance = balance - ? WHERE id = ?").run(
+            amount,
+            user_id,
+          )
+          db.prepare(
+            "INSERT INTO topic_bets (topic_event_id, user_id, answer, amount) VALUES (?, ?, ?, ?)",
+          ).run(topicId, user_id, answer.trim(), amount)
+        })
+        transaction()
+
+        server.publish(
+          "updates",
+          JSON.stringify({
+            type: "topic_bet_placed",
+            data: { topic_id: topicId, user_id, amount },
+          }),
+        )
+        return Response.json({ success: true })
+      },
+    },
+
+    "/api/topics/:id/resolve": {
+      async POST(req) {
+        const { user_id, resolution_text, allocations } = await req.json()
+        const topicId = req.params.id
+
+        const topic = db
+          .prepare("SELECT * FROM topic_events WHERE id = ?")
+          .get(topicId) as any
+        if (!topic)
+          return Response.json({ error: "Unbekanntes Thema." }, { status: 404 })
+        if (topic.status !== "open")
+          return Response.json(
+            { error: "Dieses Thema ist bereits abgeschlossen." },
+            { status: 400 },
+          )
+        if (topic.creator_id !== user_id)
+          return Response.json(
+            { error: "Nur der Ersteller kann auflösen." },
+            { status: 403 },
+          )
+        if (!resolution_text?.trim())
+          return Response.json(
+            { error: "Ergebnis-Beschreibung ist erforderlich." },
+            { status: 400 },
+          )
+
+        const bets = db
+          .prepare(
+            "SELECT * FROM topic_bets WHERE topic_event_id = ? ORDER BY id ASC",
+          )
+          .all(topicId) as any[]
+        const pot = bets.reduce((sum, b) => sum + b.amount, 0)
+
+        const betsByUser = new Map<number, { id: number; amount: number }[]>()
+        for (const bet of bets) {
+          const list = betsByUser.get(bet.user_id) ?? []
+          list.push({ id: bet.id, amount: bet.amount })
+          betsByUser.set(bet.user_id, list)
+        }
+
+        const awards = new Map<number, number>()
+        for (const allocation of Array.isArray(allocations) ? allocations : []) {
+          const uid = allocation?.user_id
+          if (!betsByUser.has(uid))
+            return Response.json(
+              { error: "Es kann nur an Mitspieler verteilt werden." },
+              { status: 400 },
+            )
+          if (awards.has(uid))
+            return Response.json(
+              { error: "Doppelte Zuteilung für denselben Spieler." },
+              { status: 400 },
+            )
+          if (!Number.isInteger(allocation.amount) || allocation.amount < 0)
+            return Response.json(
+              { error: "Zuteilungen müssen ganze Zahlen ab 0 sein." },
+              { status: 400 },
+            )
+          awards.set(uid, allocation.amount)
+        }
+
+        const assigned = [...awards.values()].reduce((sum, a) => sum + a, 0)
+        if (assigned !== pot)
+          return Response.json(
+            {
+              error: `Es müssen genau ${pot} LC verteilt werden (aktuell ${assigned} LC).`,
+            },
+            { status: 400 },
+          )
+
+        const transaction = db.transaction(() => {
+          for (const [uid, userBets] of betsByUser) {
+            const award = awards.get(uid) ?? 0
+            // Zugeteilt wird pro Spieler, gespeichert pro Wette.
+            for (const [betId, payout] of splitAcrossBets(userBets, award)) {
+              db.prepare("UPDATE topic_bets SET payout = ? WHERE id = ?").run(
+                payout,
+                betId,
+              )
+            }
+            if (award > 0)
+              db.prepare(
+                "UPDATE users SET balance = balance + ? WHERE id = ?",
+              ).run(award, uid)
+          }
+          db.prepare(
+            "UPDATE topic_events SET status = 'resolved', resolution_text = ? WHERE id = ?",
+          ).run(resolution_text.trim(), topicId)
+        })
+        transaction()
+
+        server.publish(
+          "updates",
+          JSON.stringify({
+            type: "topic_resolved",
+            data: { topic_id: topicId },
+          }),
+        )
+        return Response.json({ success: true })
+      },
+    },
+
+    "/api/topics/:id/refund": {
+      async POST(req) {
+        const { user_id, refund_reason } = await req.json()
+        const topicId = req.params.id
+
+        const topic = db
+          .prepare("SELECT * FROM topic_events WHERE id = ?")
+          .get(topicId) as any
+        if (!topic)
+          return Response.json({ error: "Unbekanntes Thema." }, { status: 404 })
+        if (topic.status !== "open")
+          return Response.json(
+            { error: "Dieses Thema ist bereits abgeschlossen." },
+            { status: 400 },
+          )
+        if (topic.creator_id !== user_id)
+          return Response.json(
+            { error: "Nur der Ersteller kann schließen." },
+            { status: 403 },
+          )
+        if (!refund_reason?.trim())
+          return Response.json(
+            { error: "Grund ist erforderlich." },
+            { status: 400 },
+          )
+
+        const bets = db
+          .prepare("SELECT * FROM topic_bets WHERE topic_event_id = ?")
+          .all(topicId) as any[]
+
+        const transaction = db.transaction(() => {
+          bets.forEach((bet) => {
+            db.prepare(
+              "UPDATE users SET balance = balance + ? WHERE id = ?",
+            ).run(bet.amount, bet.user_id)
+            db.prepare("UPDATE topic_bets SET payout = ? WHERE id = ?").run(
+              bet.amount,
+              bet.id,
+            )
+          })
+          db.prepare(
+            "UPDATE topic_events SET status = 'refunded', refund_reason = ? WHERE id = ?",
+          ).run(refund_reason.trim(), topicId)
+        })
+        transaction()
+
+        server.publish(
+          "updates",
+          JSON.stringify({
+            type: "topic_refunded",
+            data: { topic_id: topicId },
           }),
         )
         return Response.json({ success: true })
