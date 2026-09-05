@@ -20,6 +20,13 @@
           type = lib.types.str;
           default = "Friend";
         };
+        adminName = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          description = ''
+            Username with admin capabilities. Leave null to have no admin at all.
+          '';
+        };
       };
 
       config = lib.mkIf cfg.enable {
@@ -31,6 +38,9 @@
             FRIEND_BET_PORT = toString cfg.port;
             FRIEND_BET_NAME = cfg.name;
             FRIEND_BET_DB_LOCATION = "/var/lib/friend-bet";
+          }
+          // lib.optionalAttrs (cfg.adminName != null) {
+            FRIEND_BET_ADMIN = cfg.adminName;
           };
           serviceConfig = {
             Type = "exec";

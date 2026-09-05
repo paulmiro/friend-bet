@@ -13,6 +13,9 @@ import {
   MessageSquare,
   RotateCcw,
   Undo2,
+  ShieldAlert,
+  Pencil,
+  Trash2,
 } from "lucide-react"
 import { redistribute } from "./payout"
 
@@ -20,6 +23,11 @@ interface User {
   id: number
   username: string
   balance: number
+}
+
+/** Ranglisten-Zeile. `active` = hat mindestens eine abgeschlossene Wette. */
+interface LeaderboardUser extends User {
+  active: number
 }
 
 interface Event {
@@ -70,6 +78,18 @@ interface Bet {
 
 const friendName = process.env.FRIEND_BET_NAME as string // replaced by bun at build time
 
+// Optional. Anders als FRIEND_BET_NAME darf diese Variable fehlen: bun ersetzt
+// nur gesetzte FRIEND_BET_*-Variablen durch ihren Wert und lässt den Ausdruck
+// sonst unverändert stehen — und "process" gibt es im Browser nicht. Ist sie
+// gesetzt, steht hier also ein String; ist sie es nicht, fliegt ein
+// ReferenceError, den wir schlucken. Ein typeof-Test hilft nicht: der wäre
+// auch im ersetzten Fall "undefined".
+let adminNameFromEnv = ""
+try {
+  adminNameFromEnv = process.env.FRIEND_BET_ADMIN ?? ""
+} catch {}
+const adminName = adminNameFromEnv
+
 const parseLocalDatetime = (value: string): Date => {
   const [datePart, timePart] = value.split("T")
   if (!datePart || !timePart) {
@@ -102,6 +122,9 @@ export function App() {
   const [createType, setCreateType] = useState<"punctuality" | "topic">(
     "punctuality",
   )
+  // Bewusst nur State: der Admin-Modus gilt für diese Sitzung und wird nicht
+  // im localStorage gemerkt.
+  const [adminMode, setAdminMode] = useState(false)
   const [notification, setNotification] = useState<string | null>(null)
   // Zähler statt Prop-Vergleich: sagt den Karten, dass sie ihre Wetten neu
   // laden sollen, auch wenn sich das Event selbst nicht verändert hat.
@@ -144,6 +167,9 @@ export function App() {
         type === "topic_bet_placed"
       ) {
         fetchTopics()
+        setRefreshTick((tick) => tick + 1)
+        if (user) refreshUser(user.id)
+      } else if (type === "admin_update") {
         setRefreshTick((tick) => tick + 1)
         if (user) refreshUser(user.id)
       }
@@ -216,6 +242,7 @@ export function App() {
 
   const logout = () => {
     setUser(null)
+    setAdminMode(false)
     localStorage.removeItem("friend_bet_user")
   }
 
@@ -258,6 +285,13 @@ export function App() {
     }
   }
 
+  const isAdminUser =
+    !!adminName &&
+    !!user &&
+    user.username.toLowerCase() === adminName.toLowerCase()
+  // Alle Admin-Bedienelemente hängen an diesem einen Flag.
+  const adminActive = isAdminUser && adminMode
+
   // Ein gemeinsamer Feed: beide Sorten nach Alter, offene zuerst.
   const feed = [
     ...events.map((event) => ({
@@ -269,6 +303,7 @@ export function App() {
           event={event}
           currentUser={user!}
           friendName={friendName}
+          adminActive={adminActive}
           onUpdate={refreshAll}
         />
       ),
@@ -282,6 +317,7 @@ export function App() {
           topic={topic}
           currentUser={user!}
           refreshTick={refreshTick}
+          adminActive={adminActive}
           onUpdate={refreshAll}
         />
       ),
@@ -376,6 +412,15 @@ export function App() {
                 {user.balance} LC
               </span>
             </button>
+            {adminActive && (
+              <span
+                className="flex items-center gap-1 h-9 sm:h-10 px-2 sm:px-2.5 rounded-xl border border-amber-500/40 bg-amber-500/10 text-amber-400 text-[10px] font-black uppercase tracking-tighter"
+                title="Admin-Modus aktiv"
+              >
+                <ShieldAlert size={14} />
+                <span className="hidden sm:inline">Admin</span>
+              </span>
+            )}
             <button
               onClick={logout}
               className="h-9 w-9 sm:h-10 sm:w-10 bg-slate-800/40 hover:bg-red-950/20 border border-slate-700/30 hover:border-red-900/30 rounded-xl text-slate-400 hover:text-red-400 transition-all flex items-center justify-center"
@@ -501,14 +546,23 @@ export function App() {
           </div>
         )}
 
-        {view === "account" && <AccountOverview userId={user.id} />}
+        {view === "account" && (
+          <AccountOverview
+            userId={user.id}
+            isAdminUser={isAdminUser}
+            adminMode={adminMode}
+            onToggleAdminMode={() => setAdminMode((on) => !on)}
+          />
+        )}
         {view === "transparency" && (
           <TransparencyPage
             friendName={friendName}
             onBack={() => setView("dashboard")}
           />
         )}
-        {view === "leaderboard" && <LeaderboardPage currentUser={user} />}
+        {view === "leaderboard" && (
+          <LeaderboardPage currentUser={user} adminActive={adminActive} />
+        )}
       </main>
 
       <footer className="border-t border-slate-900 mt-20 bg-slate-950 py-12">
@@ -639,7 +693,17 @@ function TransparencyPage({
   )
 }
 
-function AccountOverview({ userId }: { userId: number }) {
+function AccountOverview({
+  userId,
+  isAdminUser,
+  adminMode,
+  onToggleAdminMode,
+}: {
+  userId: number
+  isAdminUser: boolean
+  adminMode: boolean
+  onToggleAdminMode: () => void
+}) {
   const [data, setData] = useState<{ stats: any; history: any[] } | null>(null)
 
   useEffect(() => {
@@ -759,6 +823,31 @@ function AccountOverview({ userId }: { userId: number }) {
           )}
         </div>
       </div>
+
+      {isAdminUser && (
+        <div className="bg-slate-900 rounded-3xl border border-amber-900/40 p-6 flex items-center justify-between gap-4">
+          <div className="space-y-1">
+            <span className="text-white font-bold flex items-center gap-2">
+              <ShieldAlert size={16} className="text-amber-500" />
+              Admin-Modus
+            </span>
+            <p className="text-sm text-slate-500">
+              Blendet Verwaltungs-Funktionen ein. Gilt nur für diese Sitzung.
+            </p>
+          </div>
+          <button
+            onClick={onToggleAdminMode}
+            role="switch"
+            aria-checked={adminMode}
+            aria-label="Admin-Modus"
+            className={`relative h-8 w-14 shrink-0 rounded-full border transition-colors ${adminMode ? "bg-amber-500/30 border-amber-500/50" : "bg-slate-800 border-slate-700"}`}
+          >
+            <span
+              className={`absolute top-1 h-5 w-5 rounded-full transition-all ${adminMode ? "left-8 bg-amber-400" : "left-1 bg-slate-500"}`}
+            />
+          </button>
+        </div>
+      )}
     </div>
   )
 }
@@ -767,11 +856,13 @@ function EventCard({
   event,
   currentUser,
   friendName,
+  adminActive,
   onUpdate,
 }: {
   event: Event
   currentUser: User
   friendName: string
+  adminActive: boolean
   onUpdate: () => void
 }) {
   const [bets, setBets] = useState<Bet[]>([])
@@ -881,6 +972,8 @@ function EventCard({
 
   const isTargetFriend =
     currentUser.username.toLowerCase() === friendName.toLowerCase()
+  // Im Admin-Modus fühlt sich jedes fremde Event wie ein eigenes an.
+  const canManage = currentUser.id === event.creator_id || adminActive
 
   return (
     <div
@@ -1020,7 +1113,7 @@ function EventCard({
                     Wetten
                   </button>
                 )}
-                {currentUser.id === event.creator_id && (
+                {canManage && (
                   <button
                     onClick={() => setIsResolving(true)}
                     className="flex-1 py-3 bg-slate-800 hover:bg-slate-700 text-white font-bold rounded-xl transition-all active:scale-95"
@@ -1028,7 +1121,7 @@ function EventCard({
                     Beenden
                   </button>
                 )}
-                {currentUser.id === event.creator_id && (
+                {canManage && (
                   <button
                     onClick={() => setIsCancelling(true)}
                     className="py-3 px-4 bg-red-900/30 hover:bg-red-900/50 text-red-400 font-bold rounded-xl transition-all active:scale-95 border border-red-900/50"
@@ -1192,11 +1285,13 @@ function TopicCard({
   topic,
   currentUser,
   refreshTick,
+  adminActive,
   onUpdate,
 }: {
   topic: TopicEvent
   currentUser: User
   refreshTick: number
+  adminActive: boolean
   onUpdate: () => void
 }) {
   const [bets, setBets] = useState<TopicBet[]>([])
@@ -1260,7 +1355,8 @@ function TopicCard({
     }
   }
 
-  const isCreator = currentUser.id === topic.creator_id
+  // Im Admin-Modus fühlt sich jede fremde Wette wie eine eigene an.
+  const canManage = currentUser.id === topic.creator_id || adminActive
   const pot = bets.reduce((sum, bet) => sum + bet.amount, 0)
   const hasBet = bets.some((bet) => bet.user_id === currentUser.id)
 
@@ -1371,7 +1467,7 @@ function TopicCard({
                 >
                   {hasBet ? "Nochmal wetten" : "Wetten"}
                 </button>
-                {isCreator && (
+                {canManage && (
                   <button
                     onClick={() => setIsResolving(true)}
                     className="flex-1 py-3 bg-slate-800 hover:bg-slate-700 text-white font-bold rounded-xl transition-all active:scale-95"
@@ -1379,7 +1475,7 @@ function TopicCard({
                     Auflösen
                   </button>
                 )}
-                {isCreator && (
+                {canManage && (
                   <button
                     onClick={() => setIsRefunding(true)}
                     className="py-3 px-4 bg-red-900/30 hover:bg-red-900/50 text-red-400 font-bold rounded-xl transition-all active:scale-95 border border-red-900/50"
@@ -1761,24 +1857,82 @@ function ResolveTopicModal({
   )
 }
 
-function LeaderboardPage({ currentUser }: { currentUser: User }) {
-  const [users, setUsers] = useState<User[]>([])
+function LeaderboardPage({
+  currentUser,
+  adminActive,
+}: {
+  currentUser: User
+  adminActive: boolean
+}) {
+  const [users, setUsers] = useState<LeaderboardUser[]>([])
   const [loading, setLoading] = useState(true)
+  // Welche Zeile gerade eine Admin-Aktion offen hat — immer höchstens eine.
+  const [editing, setEditing] = useState<number | null>(null)
+  const [deleting, setDeleting] = useState<number | null>(null)
+
+  const fetchLeaderboard = async () => {
+    try {
+      const res = await fetch(
+        adminActive
+          ? `/api/leaderboard?admin_id=${currentUser.id}`
+          : "/api/leaderboard",
+      )
+      setUsers(await res.json())
+    } catch (err) {
+      console.error(err)
+    } finally {
+      setLoading(false)
+    }
+  }
 
   useEffect(() => {
-    const fetchLeaderboard = async () => {
-      try {
-        const res = await fetch("/api/leaderboard")
-        const data = await res.json()
-        setUsers(data)
-      } catch (err) {
-        console.error(err)
-      } finally {
-        setLoading(false)
-      }
-    }
+    setEditing(null)
+    setDeleting(null)
     fetchLeaderboard()
-  }, [])
+  }, [adminActive])
+
+  const saveBalance = async (target: LeaderboardUser, balance: number) => {
+    if (!Number.isInteger(balance) || balance < 0) {
+      alert("Kontostand muss eine ganze Zahl ab 0 sein.")
+      return
+    }
+    if (
+      !confirm(
+        `Kontostand von ${target.username} auf ${balance} LC setzen? (bisher ${target.balance} LC)`,
+      )
+    )
+      return
+    try {
+      const res = await fetch(`/api/admin/users/${target.id}/balance`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ admin_id: currentUser.id, balance }),
+      })
+      if (!res.ok) throw new Error((await res.json()).error || "Fehlgeschlagen")
+      setEditing(null)
+      fetchLeaderboard()
+    } catch (err: any) {
+      alert(err.message)
+    }
+  }
+
+  const deleteUser = async (target: LeaderboardUser, typed: string) => {
+    try {
+      const res = await fetch(`/api/admin/users/${target.id}/delete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          admin_id: currentUser.id,
+          confirm_username: typed,
+        }),
+      })
+      if (!res.ok) throw new Error((await res.json()).error || "Fehlgeschlagen")
+      setDeleting(null)
+      fetchLeaderboard()
+    } catch (err: any) {
+      alert(err.message)
+    }
+  }
 
   if (loading) {
     return <div className="text-center py-20 text-slate-500">Lädt...</div>
@@ -1786,11 +1940,17 @@ function LeaderboardPage({ currentUser }: { currentUser: User }) {
 
   return (
     <div className="max-w-2xl mx-auto space-y-8 animate-in fade-in duration-300">
-      <div>
+      <div className="space-y-2">
         <h2 className="text-3xl font-bold text-white flex items-center gap-2">
           <Trophy className="text-yellow-500" size={32} />
           Rangliste
         </h2>
+        {adminActive && (
+          <p className="text-sm text-amber-500/80 flex items-center gap-1.5">
+            <ShieldAlert size={14} />
+            Admin-Modus: inaktive Konten werden mit angezeigt.
+          </p>
+        )}
       </div>
 
       <div className="bg-slate-900 rounded-3xl border border-slate-800 shadow-xl overflow-hidden">
@@ -1804,44 +1964,88 @@ function LeaderboardPage({ currentUser }: { currentUser: User }) {
             ]
             const medalEmojis = ["🥇", "🥈", "🥉"]
             const isCurrentUser = u.id === currentUser.id
+            const isInactive = u.active === 0
 
             return (
               <div
                 key={u.id}
-                className={`p-6 flex items-center justify-between hover:bg-slate-800/30 transition-all ${
+                className={`p-6 space-y-4 hover:bg-slate-800/30 transition-all ${
                   isCurrentUser
                     ? "bg-blue-900/10 border-y border-blue-900/50"
                     : ""
-                }`}
+                } ${isInactive ? "opacity-60" : ""}`}
               >
-                <div className="flex items-center gap-4">
-                  <div
-                    className={`w-10 h-10 rounded-xl flex items-center justify-center font-black border text-lg ${
-                      isTop3
-                        ? rankColors[index]
-                        : "bg-slate-800 text-slate-400 border-slate-700"
-                    }`}
-                  >
-                    {isTop3 ? medalEmojis[index] : index + 1}
-                  </div>
-                  <div>
-                    <span
-                      className={`font-bold text-lg block ${isCurrentUser ? "text-blue-400" : "text-white"}`}
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-4 min-w-0">
+                    <div
+                      className={`w-10 h-10 shrink-0 rounded-xl flex items-center justify-center font-black border text-lg ${
+                        isTop3 && !isInactive
+                          ? rankColors[index]
+                          : "bg-slate-800 text-slate-400 border-slate-700"
+                      }`}
                     >
-                      {u.username}
-                      {isCurrentUser && (
-                        <span className="ml-2 text-xs bg-blue-500/20 text-blue-400 px-2 py-0.5 rounded font-medium">
-                          Du
-                        </span>
+                      {isTop3 && !isInactive ? medalEmojis[index] : index + 1}
+                    </div>
+                    <div className="min-w-0">
+                      <span
+                        className={`font-bold text-lg block truncate ${isCurrentUser ? "text-blue-400" : "text-white"}`}
+                      >
+                        {u.username}
+                      </span>
+                      {(isCurrentUser || isInactive) && (
+                        <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                          {isCurrentUser && (
+                            <span className="text-xs bg-blue-500/20 text-blue-400 px-2 py-0.5 rounded font-medium">
+                              Du
+                            </span>
+                          )}
+                          {isInactive && (
+                            <span className="text-xs bg-slate-700/50 text-slate-400 px-2 py-0.5 rounded font-medium">
+                              Inaktiv
+                            </span>
+                          )}
+                        </div>
                       )}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="text-lg sm:text-xl font-black text-yellow-500 whitespace-nowrap">
+                      {u.balance} LC
                     </span>
+                    {adminActive && (
+                      <>
+                        <button
+                          onClick={() => {
+                            setDeleting(null)
+                            setEditing(editing === u.id ? null : u.id)
+                          }}
+                          title="Kontostand bearbeiten"
+                          className={`h-9 w-9 shrink-0 rounded-lg border flex items-center justify-center transition-all ${editing === u.id ? "bg-amber-500/20 border-amber-500/40 text-amber-400" : "bg-slate-800/60 border-slate-700 text-slate-400 hover:text-slate-200"}`}
+                        >
+                          <Pencil size={15} />
+                        </button>
+                        <button
+                          onClick={() => {
+                            setEditing(null)
+                            setDeleting(deleting === u.id ? null : u.id)
+                          }}
+                          title="Benutzer löschen"
+                          className={`h-9 w-9 shrink-0 rounded-lg border flex items-center justify-center transition-all ${deleting === u.id ? "bg-red-500/20 border-red-500/40 text-red-400" : "bg-slate-800/60 border-slate-700 text-slate-400 hover:text-red-400"}`}
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
-                <div className="text-right">
-                  <span className="text-xl font-black text-yellow-500 block">
-                    {u.balance} LC
-                  </span>
-                </div>
+
+                {adminActive && editing === u.id && (
+                  <BalanceEditor user={u} onSave={saveBalance} />
+                )}
+
+                {adminActive && deleting === u.id && (
+                  <DeleteUserConfirm user={u} onDelete={deleteUser} />
+                )}
               </div>
             )
           })}
@@ -1853,6 +2057,90 @@ function LeaderboardPage({ currentUser }: { currentUser: User }) {
         </div>
       </div>
     </div>
+  )
+}
+
+function BalanceEditor({
+  user,
+  onSave,
+}: {
+  user: LeaderboardUser
+  onSave: (user: LeaderboardUser, balance: number) => void
+}) {
+  const [value, setValue] = useState(String(user.balance))
+
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault()
+        onSave(user, Number(value))
+      }}
+      className="flex items-center gap-2 animate-in fade-in slide-in-from-top-1 duration-200"
+    >
+      <input
+        type="number"
+        min={0}
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onFocus={(e) => e.target.select()}
+        autoFocus
+        required
+        className="w-24 px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-sm text-white text-center"
+      />
+      <span className="text-xs text-slate-500">LC</span>
+      <button
+        type="submit"
+        className="flex-1 py-2 bg-amber-600 hover:bg-amber-500 text-white text-sm font-bold rounded-lg transition-all active:scale-95"
+      >
+        Speichern
+      </button>
+    </form>
+  )
+}
+
+/**
+ * Löschen verlangt den ausgeschriebenen Benutzernamen — ein Fehlklick allein
+ * reicht so nicht aus.
+ */
+function DeleteUserConfirm({
+  user,
+  onDelete,
+}: {
+  user: LeaderboardUser
+  onDelete: (user: LeaderboardUser, typed: string) => void
+}) {
+  const [typed, setTyped] = useState("")
+  const matches = typed.trim().toLowerCase() === user.username.toLowerCase()
+
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault()
+        if (matches) onDelete(user, typed)
+      }}
+      className="space-y-2 animate-in fade-in slide-in-from-top-1 duration-200"
+    >
+      <label className="text-[10px] font-black text-red-500 uppercase tracking-widest block">
+        Zum Löschen "{user.username}" eintippen:
+      </label>
+      <div className="flex items-center gap-2">
+        <input
+          type="text"
+          value={typed}
+          onChange={(e) => setTyped(e.target.value)}
+          placeholder={user.username}
+          autoFocus
+          className="flex-1 min-w-0 px-3 py-2 bg-slate-950 border border-red-900/50 rounded-lg text-sm text-white"
+        />
+        <button
+          type="submit"
+          disabled={!matches}
+          className="py-2 px-4 bg-red-700 hover:bg-red-600 text-white text-sm font-bold rounded-lg transition-all active:scale-95 disabled:opacity-40 disabled:active:scale-100"
+        >
+          Löschen
+        </button>
+      </div>
+    </form>
   )
 }
 
