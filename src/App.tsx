@@ -156,6 +156,7 @@ export function App() {
       } else if (
         type === "event_resolved" ||
         type === "event_cancelled" ||
+        type === "event_deleted" ||
         type === "bonus_awarded" ||
         type === "bet_placed"
       ) {
@@ -164,6 +165,7 @@ export function App() {
       } else if (
         type === "topic_resolved" ||
         type === "topic_refunded" ||
+        type === "topic_deleted" ||
         type === "topic_bet_placed"
       ) {
         fetchTopics()
@@ -852,6 +854,157 @@ function AccountOverview({
   )
 }
 
+/** Admin-Hilfe: die Datenbank-ID, dezent hinter dem Namen bzw. Titel. */
+function IdTag({ id }: { id: number }) {
+  return (
+    <span className="ml-1.5 font-normal normal-case tracking-normal text-slate-600">
+      [{id}]
+    </span>
+  )
+}
+
+/**
+ * Bestätigungsdialog zum kompletten Löschen eines Events (Admin).
+ * Die Liste kommt vom Server, damit sie genau das zeigt, was beim Löschen
+ * auch passiert — inklusive der Kappung bei Kontostand 0.
+ */
+function DeleteItemModal({
+  kind,
+  id,
+  title,
+  adminId,
+  onClose,
+  onDeleted,
+}: {
+  kind: "events" | "topics"
+  id: number
+  title: string
+  adminId: number
+  onClose: () => void
+  onDeleted: () => void
+}) {
+  const [plan, setPlan] = useState<{
+    bets: number
+    users: {
+      user_id: number
+      username: string
+      change: number
+      applied: number
+    }[]
+  } | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    fetch(`/api/admin/${kind}/${id}/delete?admin_id=${adminId}`)
+      .then(async (res) => {
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.error || "Laden fehlgeschlagen")
+        setPlan(data)
+      })
+      .catch((err) => setError(err.message))
+  }, [kind, id, adminId])
+
+  const confirmDelete = async () => {
+    setBusy(true)
+    try {
+      const res = await fetch(`/api/admin/${kind}/${id}/delete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ admin_id: adminId }),
+      })
+      if (!res.ok)
+        throw new Error((await res.json()).error || "Löschen fehlgeschlagen")
+      onDeleted()
+    } catch (err: any) {
+      setError(err.message)
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-md bg-slate-900 border border-red-900/50 rounded-3xl p-6 space-y-4 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="space-y-1">
+          <h3 className="text-lg font-bold text-white">
+            "{title}" komplett löschen?
+          </h3>
+          <p className="text-sm text-slate-400">
+            Das Event und alle {plan ? `${plan.bets} ` : ""}Wetten werden
+            unwiderruflich entfernt.
+          </p>
+        </div>
+
+        {plan && (
+          <div className="space-y-2">
+            <h4 className="text-xs font-bold text-slate-500 uppercase tracking-widest">
+              Kontoänderungen
+            </h4>
+            {plan.users.length === 0 ? (
+              <p className="text-sm text-slate-500">Keine Wetten.</p>
+            ) : (
+              <ul className="space-y-1.5 max-h-60 overflow-y-auto">
+                {plan.users.map((u) => (
+                  <li
+                    key={u.user_id}
+                    className="flex items-center justify-between text-sm bg-slate-950/50 rounded-xl border border-slate-800/50 px-3 py-2"
+                  >
+                    <span className="font-bold text-white">{u.username}</span>
+                    <span
+                      className={`font-black ${u.applied > 0 ? "text-green-400" : u.applied < 0 ? "text-red-400" : "text-slate-500"}`}
+                    >
+                      {u.applied > 0 ? "+" : ""}
+                      {u.applied} LC
+                      {u.applied !== u.change && (
+                        <span
+                          className="ml-1 text-[10px] font-normal text-slate-500"
+                          title="Der Kontostand reicht nicht für die volle Rücknahme."
+                        >
+                          (statt {u.change})
+                        </span>
+                      )}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {plan.users.some((u) => u.applied !== 0) && (
+              <p className="text-xs text-slate-500">
+                Positiv = wird erstattet, negativ = bereits ausgezahlter Gewinn
+                wird zurückgenommen.
+              </p>
+            )}
+          </div>
+        )}
+
+        {error && <p className="text-sm text-red-400">{error}</p>}
+
+        <div className="flex gap-2">
+          <button
+            onClick={confirmDelete}
+            disabled={!plan || busy}
+            className="flex-1 py-2 bg-red-700 hover:bg-red-600 disabled:opacity-50 text-white font-bold rounded-lg transition-all"
+          >
+            Löschen
+          </button>
+          <button
+            onClick={onClose}
+            className="flex-1 py-2 bg-slate-800 text-slate-400 font-bold rounded-lg transition-all"
+          >
+            Abbruch
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function EventCard({
   event,
   currentUser,
@@ -869,6 +1022,7 @@ function EventCard({
   const [showBetForm, setShowBetForm] = useState(false)
   const [isResolving, setIsResolving] = useState(false)
   const [isCancelling, setIsCancelling] = useState(false)
+  const [isDeleting, setIsDeleting] = useState(false)
   const [betDirection, setBetDirection] = useState<"plus" | "minus">("plus")
 
   useEffect(() => {
@@ -984,10 +1138,12 @@ function EventCard({
           <div className="space-y-1">
             <h3 className="text-xl font-bold text-white group-hover:text-blue-400 transition-colors">
               {event.description}
+              {adminActive && <IdTag id={event.id} />}
             </h3>
             {event.creator_name && (
               <span className="text-xs font-bold text-slate-500 uppercase tracking-widest">
                 Von {event.creator_name}
+                {adminActive && <IdTag id={event.creator_id} />}
               </span>
             )}
           </div>
@@ -1048,6 +1204,7 @@ function EventCard({
                   <div className="flex items-center gap-2">
                     <span className="font-bold text-white text-sm">
                       {bet.username}
+                      {adminActive && <IdTag id={bet.user_id} />}
                     </span>
                     <span className="text-xs text-slate-500">
                       {new Date(bet.bet_arrival_time).toLocaleTimeString(
@@ -1072,10 +1229,11 @@ function EventCard({
                     )}
                   </div>
                 </div>
-                {bet.excuse && (
+                {(bet.excuse || adminActive) && (
                   <div className="pt-2 border-t border-slate-800 flex items-start justify-between gap-4">
                     <p className="text-xs text-slate-400 italic">
-                      " {bet.excuse} "
+                      {bet.excuse && `" ${bet.excuse} "`}
+                      {adminActive && <IdTag id={bet.id} />}
                     </p>
                     {bet.bonus_given === 1 && (
                       <span className="bg-yellow-500/10 text-yellow-500 text-[10px] px-1.5 py-0.5 rounded font-black">
@@ -1277,6 +1435,27 @@ function EventCard({
           </div>
         )}
       </div>
+      {adminActive && (
+        <button
+          onClick={() => setIsDeleting(true)}
+          className="w-full py-2.5 flex items-center justify-center gap-2 bg-red-950/40 hover:bg-red-900/40 text-red-400 text-xs font-bold uppercase tracking-widest border-t border-red-900/40 transition-all"
+        >
+          <Trash2 size={14} /> Komplett löschen
+        </button>
+      )}
+      {isDeleting && (
+        <DeleteItemModal
+          kind="events"
+          id={event.id}
+          title={event.description}
+          adminId={currentUser.id}
+          onClose={() => setIsDeleting(false)}
+          onDeleted={() => {
+            setIsDeleting(false)
+            onUpdate()
+          }}
+        />
+      )}
     </div>
   )
 }
@@ -1298,6 +1477,7 @@ function TopicCard({
   const [showBetForm, setShowBetForm] = useState(false)
   const [isResolving, setIsResolving] = useState(false)
   const [isRefunding, setIsRefunding] = useState(false)
+  const [isDeleting, setIsDeleting] = useState(false)
 
   useEffect(() => {
     fetchBets()
@@ -1369,10 +1549,12 @@ function TopicCard({
           <div className="space-y-1">
             <h3 className="text-xl font-bold text-white group-hover:text-blue-400 transition-colors">
               {topic.description}
+              {adminActive && <IdTag id={topic.id} />}
             </h3>
             {topic.creator_name && (
               <span className="text-xs font-bold text-slate-500 uppercase tracking-widest">
                 Von {topic.creator_name}
+                {adminActive && <IdTag id={topic.creator_id} />}
               </span>
             )}
           </div>
@@ -1427,6 +1609,7 @@ function TopicCard({
                 <div className="flex items-center justify-between gap-3">
                   <span className="font-bold text-white text-sm truncate">
                     {bet.username}
+                    {adminActive && <IdTag id={bet.user_id} />}
                   </span>
                   <div className="flex items-center gap-3 shrink-0">
                     <span className="font-black text-blue-400 text-sm">
@@ -1444,6 +1627,7 @@ function TopicCard({
                 </div>
                 <p className="text-xs text-slate-400 italic break-words">
                   " {bet.answer} "
+                  {adminActive && <IdTag id={bet.id} />}
                 </p>
               </div>
             ))}
@@ -1590,6 +1774,27 @@ function TopicCard({
           onClose={() => setIsResolving(false)}
           onResolved={() => {
             setIsResolving(false)
+            onUpdate()
+          }}
+        />
+      )}
+      {adminActive && (
+        <button
+          onClick={() => setIsDeleting(true)}
+          className="w-full py-2.5 flex items-center justify-center gap-2 bg-red-950/40 hover:bg-red-900/40 text-red-400 text-xs font-bold uppercase tracking-widest border-t border-red-900/40 transition-all"
+        >
+          <Trash2 size={14} /> Komplett löschen
+        </button>
+      )}
+      {isDeleting && (
+        <DeleteItemModal
+          kind="topics"
+          id={topic.id}
+          title={topic.description}
+          adminId={currentUser.id}
+          onClose={() => setIsDeleting(false)}
+          onDeleted={() => {
+            setIsDeleting(false)
             onUpdate()
           }}
         />
