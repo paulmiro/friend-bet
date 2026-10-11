@@ -22,6 +22,103 @@ const isAdmin = (userId: unknown) => {
   return !!user && user.username.toLowerCase() === ADMIN_NAME.toLowerCase()
 }
 
+// ── Löschen (Admin) ──────────────────────────────────────────────────────
+// Ein Event samt Wetten komplett entfernen. Ziel: jeder steht danach so da,
+// als hätte es das Event nie gegeben. Pro Status heißt das:
+//   offen                  → Einsätze zurück
+//   beendet / aufgelöst    → Auszahlung (inkl. Bonus) wieder abziehen, Einsatz
+//                            zurück; Netto = Einsatz − Auszahlung
+//   storniert / erstattet  → schon erstattet, nichts zu tun
+// Der Kontostand fällt nie unter 0: wer die Gewinne schon ausgegeben hat,
+// bekommt nur so viel abgezogen, wie da ist.
+const DELETE_KINDS = {
+  events: { table: "events", betTable: "bets", fk: "event_id", settled: "closed", undone: "cancelled" },
+  topics: { table: "topic_events", betTable: "topic_bets", fk: "topic_event_id", settled: "resolved", undone: "refunded" },
+} as const
+
+const planDelete = (kind: keyof typeof DELETE_KINDS, id: unknown) => {
+  const k = DELETE_KINDS[kind]
+  const item = db
+    .prepare(`SELECT * FROM ${k.table} WHERE id = ?`)
+    .get(id as any) as any
+  if (!item) return null
+
+  const bets = db
+    .prepare(`SELECT * FROM ${k.betTable} WHERE ${k.fk} = ?`)
+    .all(item.id) as any[]
+
+  const delta = new Map<number, number>()
+  for (const bet of bets) {
+    const change =
+      item.status === k.undone
+        ? 0
+        : item.status === k.settled
+          ? bet.amount - bet.payout
+          : bet.amount
+    delta.set(bet.user_id, (delta.get(bet.user_id) ?? 0) + change)
+  }
+
+  const users = [...delta].map(([user_id, change]) => {
+    const user = db
+      .prepare("SELECT username, balance FROM users WHERE id = ?")
+      .get(user_id) as any
+    const applied = Math.max(change, -user.balance)
+    return { user_id, username: user.username, change, applied }
+  })
+  users.sort((a, b) => a.username.localeCompare(b.username))
+
+  return { item, bets: bets.length, users }
+}
+
+const deleteRoute = (kind: keyof typeof DELETE_KINDS) => ({
+  // Vorschau für den Bestätigungsdialog.
+  async GET(req: Request & { params: { id: string } }) {
+    const adminId = Number(new URL(req.url).searchParams.get("admin_id"))
+    if (!isAdmin(adminId))
+      return Response.json({ error: "Keine Admin-Rechte." }, { status: 403 })
+
+    const plan = planDelete(kind, req.params.id)
+    if (!plan)
+      return Response.json({ error: "Unbekanntes Event." }, { status: 404 })
+    return Response.json({ bets: plan.bets, users: plan.users })
+  },
+
+  async POST(req: Request & { params: { id: string } }) {
+    const { admin_id } = await req.json()
+    if (!isAdmin(admin_id))
+      return Response.json({ error: "Keine Admin-Rechte." }, { status: 403 })
+
+    const k = DELETE_KINDS[kind]
+    const transaction = db.transaction(() => {
+      // Plan und Ausführung in einer Transaktion, sonst könnte zwischen
+      // Vorschau und Löschen eine Wette dazukommen.
+      const plan = planDelete(kind, req.params.id)
+      if (!plan) return false
+      for (const u of plan.users) {
+        if (u.applied !== 0)
+          db.prepare("UPDATE users SET balance = balance + ? WHERE id = ?").run(
+            u.applied,
+            u.user_id,
+          )
+      }
+      db.prepare(`DELETE FROM ${k.betTable} WHERE ${k.fk} = ?`).run(plan.item.id)
+      db.prepare(`DELETE FROM ${k.table} WHERE id = ?`).run(plan.item.id)
+      return true
+    })
+    if (!transaction())
+      return Response.json({ error: "Unbekanntes Event." }, { status: 404 })
+
+    server.publish(
+      "updates",
+      JSON.stringify({
+        type: kind === "events" ? "event_deleted" : "topic_deleted",
+        data: { id: req.params.id },
+      }),
+    )
+    return Response.json({ success: true })
+  },
+})
+
 const server = serve({
   port: parseInt(process.env.FRIEND_BET_PORT || "3000"),
   routes: {
@@ -757,6 +854,9 @@ const server = serve({
     // ── Admin ──────────────────────────────────────────────────────────────
     // Nur erreichbar, wenn FRIEND_BET_ADMIN gesetzt ist und die mitgeschickte
     // user_id genau diesem Namen gehört.
+
+    "/api/admin/events/:id/delete": deleteRoute("events"),
+    "/api/admin/topics/:id/delete": deleteRoute("topics"),
 
     "/api/admin/users/:id/balance": {
       async POST(req) {
